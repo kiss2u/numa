@@ -58,6 +58,12 @@ else
 fi
 
 chmod +x "$INSTALL_DIR/numa"
+
+# macOS: ad-hoc codesign (required or the binary gets killed)
+if [ "$OS_NAME" = "macos" ]; then
+  codesign -f -s - "$INSTALL_DIR/numa" 2>/dev/null || true
+fi
+
 rm -rf "$TMP"
 
 echo ""

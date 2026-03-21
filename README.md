@@ -84,7 +84,7 @@ Query → Overrides → .numa TLD → Blocklist → Local Zones → Cache → Up
 
 No DNS libraries. The wire protocol — headers, labels, compression pointers, record types — is parsed and serialized by hand. Runs on `tokio` + `axum`, async per-query task spawning.
 
-[Full API reference (22 endpoints)](docs/development-plan.md) · [Configuration reference](numa.toml)
+[Configuration reference](numa.toml)
 
 ## Roadmap
 
