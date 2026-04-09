@@ -46,6 +46,49 @@ pub fn discover_system_dns() -> SystemDnsInfo {
     }
 }
 
+/// True if `bind_addr` targets DNS port 53. Used to scope the port-53
+/// conflict advisory — we only want to print the systemd-resolved /
+/// Dnscache hint when the user is actually trying to bind the DNS port.
+pub fn is_port_53(bind_addr: &str) -> bool {
+    bind_addr
+        .parse::<SocketAddr>()
+        .map(|s| s.port() == 53)
+        .unwrap_or(false)
+}
+
+/// Human-readable diagnostic for port-53 bind conflicts. Offers two
+/// concrete fixes: install Numa as the system resolver, or bind to a
+/// non-privileged port.
+pub fn port53_conflict_advisory(bind_addr: &str) -> String {
+    let o = "\x1b[1;38;2;192;98;58m"; // bold orange
+    let r = "\x1b[0m";
+    format!(
+        "
+{o}Numa{r} — cannot bind to {bind_addr}: port 53 is already in use.
+
+  Another process is already bound to port 53. On Linux this is
+  typically systemd-resolved; on Windows, the DNS Client service.
+
+  Fix — pick one:
+
+    1. Install Numa as the system resolver (frees port 53):
+
+         sudo numa install       (on Windows, run as Administrator)
+
+    2. Run on a non-privileged port for testing.
+       Create ~/.config/numa/numa.toml with:
+
+         [server]
+         bind_addr = \"127.0.0.1:5354\"
+         api_port  = 5380
+
+       Then run:  numa
+       Test with: dig @127.0.0.1 -p 5354 example.com
+
+"
+    )
+}
+
 #[cfg(target_os = "macos")]
 fn discover_macos() -> SystemDnsInfo {
     use log::{debug, warn};
