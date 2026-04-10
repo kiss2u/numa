@@ -54,6 +54,9 @@ async fn main() -> numa::Result<()> {
                 }
             };
         }
+        "setup-phone" => {
+            return numa::setup_phone::run().await.map_err(|e| e.into());
+        }
         "lan" => {
             let sub = std::env::args().nth(2).unwrap_or_default();
             let config_path = std::env::args()
@@ -85,12 +88,27 @@ async fn main() -> numa::Result<()> {
             eprintln!("  service status  Check if the service is running");
             eprintln!("  lan on          Enable LAN service discovery (mDNS)");
             eprintln!("  lan off         Disable LAN service discovery");
+            eprintln!("  setup-phone     Generate a QR code to install Numa DoT on a phone");
             eprintln!("  help            Show this help");
             eprintln!();
             eprintln!("Config path defaults to numa.toml");
             return Ok(());
         }
-        _ => {}
+        _ => {
+            if !arg1.is_empty()
+                && arg1 != "run"
+                && !arg1.contains('/')
+                && !arg1.contains('\\')
+                && !arg1.ends_with(".toml")
+            {
+                eprintln!(
+                    "\x1b[1;38;2;192;98;58mNuma\x1b[0m — unknown command: \x1b[1m{}\x1b[0m\n",
+                    arg1
+                );
+                eprintln!("Run \x1b[1mnuma help\x1b[0m for a list of commands.");
+                std::process::exit(1);
+            }
+        }
     }
 
     let config_path = if arg1.is_empty() || arg1 == "run" {
@@ -235,6 +253,19 @@ async fn main() -> numa::Result<()> {
         None
     };
 
+    let health_meta = numa::health::HealthMeta::build(
+        &resolved_data_dir,
+        config.dot.enabled,
+        config.dot.port,
+        config.mobile.port,
+        config.dnssec.enabled,
+        resolved_mode == numa::config::UpstreamMode::Recursive,
+        config.lan.enabled,
+        config.blocking.enabled,
+    );
+
+    let ca_pem = std::fs::read_to_string(resolved_data_dir.join("ca.pem")).ok();
+
     let socket = match UdpSocket::bind(&config.server.bind_addr).await {
         Ok(s) => s,
         Err(e) => {
@@ -286,6 +317,8 @@ async fn main() -> numa::Result<()> {
         inflight: std::sync::Mutex::new(std::collections::HashMap::new()),
         dnssec_enabled: config.dnssec.enabled,
         dnssec_strict: config.dnssec.strict,
+        health_meta,
+        ca_pem,
     });
 
     let zone_count: usize = ctx.zone_map.values().map(|m| m.len()).sum();
@@ -468,6 +501,21 @@ async fn main() -> numa::Result<()> {
         info!("HTTP API listening on {}", api_addr);
         axum::serve(listener, app).await.unwrap();
     });
+
+    // Spawn Mobile API listener (read-only subset for iOS/Android companion
+    // apps, LAN-bound by default so phones can reach it). Only idempotent
+    // GETs; no state-mutating routes are exposed here regardless of
+    // the main API's bind address.
+    if config.mobile.enabled {
+        let mobile_ctx = Arc::clone(&ctx);
+        let mobile_bind = config.mobile.bind_addr.clone();
+        let mobile_port = config.mobile.port;
+        tokio::spawn(async move {
+            if let Err(e) = numa::mobile_api::start(mobile_ctx, mobile_bind, mobile_port).await {
+                log::warn!("Mobile API listener failed: {}", e);
+            }
+        });
+    }
 
     let proxy_bind: std::net::Ipv4Addr = config
         .proxy
