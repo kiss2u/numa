@@ -53,21 +53,39 @@ fn is_doh_host(host: Option<&str>, tld: &str) -> bool {
         Some(h) => h,
         None => return false,
     };
-    is_doh_name(h, tld)
-        || h.rsplit_once(':').is_some_and(|(base, port)| {
-            port.bytes().all(|b| b.is_ascii_digit()) && is_doh_name(base, tld)
-        })
+    let base = strip_port(h).unwrap_or(h);
+    is_loopback_host(base) || is_tld_match(base, tld)
 }
 
-fn is_doh_name(h: &str, tld: &str) -> bool {
+fn strip_port(h: &str) -> Option<&str> {
+    if h.starts_with('[') {
+        // [::1]:443 → [::1]
+        let (base, port) = h.rsplit_once("]:")?;
+        port.bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| &h[..base.len() + 1])
+    } else {
+        let (base, port) = h.rsplit_once(':')?;
+        // Bare IPv6 like "::1" has multiple colons — not a port suffix
+        if base.contains(':') {
+            return None;
+        }
+        port.bytes()
+            .all(|b| b.is_ascii_digit())
+            .then_some(base)
+    }
+}
+
+fn is_loopback_host(h: &str) -> bool {
+    matches!(h, "127.0.0.1" | "::1" | "[::1]" | "localhost")
+}
+
+fn is_tld_match(h: &str, tld: &str) -> bool {
     h == tld
         || (h.len() == 2 * tld.len() + 1
             && h.starts_with(tld)
             && h.as_bytes().get(tld.len()) == Some(&b'.')
             && h.ends_with(tld))
-        || h == "127.0.0.1"
-        || h == "::1"
-        || h == "localhost"
 }
 
 async fn resolve_doh(
@@ -160,7 +178,10 @@ mod tests {
         assert!(is_doh_host(Some("127.0.0.1"), "numa"));
         assert!(is_doh_host(Some("127.0.0.1:443"), "numa"));
         assert!(is_doh_host(Some("::1"), "numa"));
+        assert!(is_doh_host(Some("[::1]"), "numa"));
+        assert!(is_doh_host(Some("[::1]:443"), "numa"));
         assert!(is_doh_host(Some("localhost"), "numa"));
+        assert!(is_doh_host(Some("localhost:443"), "numa"));
         assert!(!is_doh_host(Some("foo.numa"), "numa"));
         assert!(!is_doh_host(None, "numa"));
     }

@@ -194,14 +194,11 @@ fn generate_service_cert(
         std::net::Ipv6Addr::LOCALHOST,
     )));
 
-    // Bare TLD (e.g. "numa") for DoH via https://numa/dns-query
-    match tld.to_string().try_into() {
-        Ok(ia5) => sans.push(SanType::DnsName(ia5)),
-        Err(e) => warn!("invalid SAN {}: {}", tld, e),
-    }
-
-    if sans.is_empty() {
-        return Err("no valid service names for TLS cert".into());
+    for name in ["localhost", tld] {
+        match name.to_string().try_into() {
+            Ok(ia5) => sans.push(SanType::DnsName(ia5)),
+            Err(e) => warn!("invalid SAN {}: {}", name, e),
+        }
     }
 
     params.subject_alt_names = sans;
