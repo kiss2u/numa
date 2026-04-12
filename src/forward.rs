@@ -176,11 +176,7 @@ pub(crate) async fn forward_udp(
 ) -> Result<DnsPacket> {
     let mut send_buffer = BytePacketBuffer::new();
     query.write(&mut send_buffer)?;
-
     let data = forward_udp_raw(send_buffer.filled(), upstream, timeout_duration).await?;
-    if data.len() >= 4096 {
-        log::debug!("upstream response may be truncated ({} bytes)", data.len());
-    }
     let mut recv_buffer = BytePacketBuffer::from_bytes(&data);
     DnsPacket::from_buffer(&mut recv_buffer)
 }

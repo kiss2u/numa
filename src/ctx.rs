@@ -229,29 +229,17 @@ pub async fn resolve_query(
                 )
                 .await
                 {
-                    Ok(resp_wire) => {
-                        ctx.cache.write().unwrap().insert_wire(
-                            &qname,
-                            qtype,
-                            &resp_wire,
-                            DnssecStatus::Indeterminate,
-                        );
-                        let mut buf = BytePacketBuffer::from_bytes(&resp_wire);
-                        match DnsPacket::from_buffer(&mut buf) {
-                            Ok(resp) => (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate),
-                            Err(e) => {
-                                error!(
-                                    "{} | {:?} {} | PARSE ERROR | {}",
-                                    src_addr, qtype, qname, e
-                                );
-                                (
-                                    DnsPacket::response_from(&query, ResultCode::SERVFAIL),
-                                    QueryPath::UpstreamError,
-                                    DnssecStatus::Indeterminate,
-                                )
-                            }
+                    Ok(resp_wire) => match cache_and_parse(ctx, &qname, qtype, &resp_wire) {
+                        Ok(resp) => (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate),
+                        Err(e) => {
+                            error!("{} | {:?} {} | PARSE ERROR | {}", src_addr, qtype, qname, e);
+                            (
+                                DnsPacket::response_from(&query, ResultCode::SERVFAIL),
+                                QueryPath::UpstreamError,
+                                DnssecStatus::Indeterminate,
+                            )
                         }
-                    }
+                    },
                     Err(e) => {
                         error!(
                             "{} | {:?} {} | UPSTREAM ERROR | {}",
@@ -373,6 +361,20 @@ pub async fn resolve_query(
     Ok(resp_buffer)
 }
 
+fn cache_and_parse(
+    ctx: &ServerCtx,
+    qname: &str,
+    qtype: QueryType,
+    resp_wire: &[u8],
+) -> crate::Result<DnsPacket> {
+    ctx.cache
+        .write()
+        .unwrap()
+        .insert_wire(qname, qtype, resp_wire, DnssecStatus::Indeterminate);
+    let mut buf = BytePacketBuffer::from_bytes(resp_wire);
+    DnsPacket::from_buffer(&mut buf)
+}
+
 async fn forward_and_cache(
     wire: &[u8],
     upstream: &Upstream,
@@ -381,12 +383,7 @@ async fn forward_and_cache(
     qtype: QueryType,
 ) -> crate::Result<DnsPacket> {
     let resp_wire = forward_query_raw(wire, upstream, ctx.timeout).await?;
-    ctx.cache
-        .write()
-        .unwrap()
-        .insert_wire(qname, qtype, &resp_wire, DnssecStatus::Indeterminate);
-    let mut buf = BytePacketBuffer::from_bytes(&resp_wire);
-    DnsPacket::from_buffer(&mut buf)
+    cache_and_parse(ctx, qname, qtype, &resp_wire)
 }
 
 pub async fn handle_query(
