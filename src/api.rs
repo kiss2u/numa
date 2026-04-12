@@ -152,6 +152,7 @@ struct QueryLogResponse {
     domain: String,
     query_type: String,
     path: String,
+    transport: String,
     rescode: String,
     latency_ms: f64,
     dnssec: String,
@@ -167,12 +168,21 @@ struct StatsResponse {
     dnssec: bool,
     srtt: bool,
     queries: QueriesStats,
+    transport: TransportStats,
     cache: CacheStats,
     overrides: OverrideStats,
     blocking: BlockingStatsResponse,
     lan: LanStatsResponse,
     mobile: MobileStatsResponse,
     memory: MemoryStats,
+}
+
+#[derive(Serialize)]
+struct TransportStats {
+    udp: u64,
+    tcp: u64,
+    dot: u64,
+    doh: u64,
 }
 
 #[derive(Serialize)]
@@ -483,6 +493,7 @@ async fn query_log(
                     domain: e.domain.clone(),
                     query_type: e.query_type.as_str().to_string(),
                     path: e.path.as_str().to_string(),
+                    transport: e.transport.as_str().to_string(),
                     rescode: e.rescode.as_str().to_string(),
                     latency_ms: e.latency_us as f64 / 1000.0,
                     dnssec: e.dnssec.as_str().to_string(),
@@ -544,6 +555,12 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
             overridden: snap.overridden,
             blocked: snap.blocked,
             errors: snap.errors,
+        },
+        transport: TransportStats {
+            udp: snap.transport_udp,
+            tcp: snap.transport_tcp,
+            dot: snap.transport_dot,
+            doh: snap.transport_doh,
         },
         cache: CacheStats {
             entries: cache_len,

@@ -5,7 +5,7 @@ use std::time::SystemTime;
 use crate::cache::DnssecStatus;
 use crate::header::ResultCode;
 use crate::question::QueryType;
-use crate::stats::QueryPath;
+use crate::stats::{QueryPath, Transport};
 
 pub struct QueryLogEntry {
     pub timestamp: SystemTime,
@@ -13,6 +13,7 @@ pub struct QueryLogEntry {
     pub domain: String,
     pub query_type: QueryType,
     pub path: QueryPath,
+    pub transport: Transport,
     pub rescode: ResultCode,
     pub latency_us: u64,
     pub dnssec: DnssecStatus,
@@ -107,6 +108,7 @@ mod tests {
             domain: "example.com".into(),
             query_type: QueryType::A,
             path: QueryPath::Forwarded,
+            transport: Transport::Udp,
             rescode: ResultCode::NOERROR,
             latency_us: 500,
             dnssec: DnssecStatus::Indeterminate,

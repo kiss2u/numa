@@ -223,6 +223,10 @@ body {
 .path-bar-fill.override { background: var(--emerald); }
 .path-bar-fill.error { background: var(--rose); }
 .path-bar-fill.blocked { background: var(--text-dim); }
+.path-bar-fill.udp { background: var(--text-dim); }
+.path-bar-fill.tcp { background: var(--violet); }
+.path-bar-fill.dot { background: var(--emerald); }
+.path-bar-fill.doh { background: var(--teal); }
 .path-pct {
   font-family: var(--font-mono);
   font-size: 0.75rem;
@@ -288,6 +292,10 @@ body {
 .path-tag.SERVFAIL { background: rgba(181, 68, 58, 0.12); color: var(--rose); }
 .path-tag.BLOCKED { background: rgba(163, 152, 136, 0.15); color: var(--text-dim); }
 .path-tag.COALESCED { background: rgba(138, 104, 158, 0.12); color: var(--violet-dim); }
+.path-tag.UDP { background: rgba(163, 152, 136, 0.15); color: var(--text-dim); }
+.path-tag.TCP { background: rgba(100, 116, 139, 0.12); color: var(--violet-dim); }
+.path-tag.DOT { background: rgba(82, 122, 82, 0.12); color: var(--emerald); }
+.path-tag.DOH { background: rgba(107, 124, 78, 0.12); color: var(--teal); }
 .src-tag { font-size: 0.6rem; color: var(--text-dim); letter-spacing: 0.02em; }
 
 /* Sidebar panels */
@@ -622,6 +630,16 @@ body {
     </div>
   </div>
 
+  <!-- Transport breakdown -->
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title">Transport</span>
+      <span class="panel-title" id="transportEncrypted" style="color: var(--text-dim)"></span>
+    </div>
+    <div class="panel-body" id="transportBars">
+    </div>
+  </div>
+
   <!-- Main grid: query log + sidebar -->
   <div class="main-grid">
     <!-- Query log -->
@@ -643,6 +661,14 @@ body {
             <option value="LOCAL">local</option>
             <option value="SERVFAIL">error</option>
           </select>
+          <select id="logFilterTransport" onchange="applyLogFilter()"
+            style="font-family:var(--font-mono);font-size:0.7rem;padding:0.25rem 0.4rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-surface);color:var(--text-secondary);outline:none;">
+            <option value="">all transports</option>
+            <option value="UDP">UDP</option>
+            <option value="TCP">TCP</option>
+            <option value="DOT">DoT</option>
+            <option value="DOH">DoH</option>
+          </select>
           <span class="panel-title" id="queryCount" style="color: var(--text-dim)"></span>
         </div>
       </div>
@@ -654,6 +680,7 @@ body {
               <th>Type</th>
               <th>Domain</th>
               <th>Path</th>
+              <th>Transport</th>
               <th>Result</th>
               <th>Latency</th>
             </tr>
@@ -907,6 +934,27 @@ function renderMemory(mem, stats) {
   `;
 }
 
+function renderBarChart(containerId, defs, data, total) {
+  total = total || 1;
+  document.getElementById(containerId).innerHTML = defs.map(d => {
+    const count = data[d.key] || 0;
+    const pct = ((count / total) * 100).toFixed(1);
+    return `
+      <div class="path-bar-row">
+        <span class="path-label">${d.label}</span>
+        <div class="path-bar-track">
+          <div class="path-bar-fill ${d.cls}" style="width: ${pct}%"></div>
+        </div>
+        <span class="path-pct">${pct}%</span>
+      </div>`;
+  }).join('');
+}
+
+function encryptionPct(transport) {
+  const total = (transport.udp + transport.tcp + transport.dot + transport.doh) || 1;
+  return (((transport.dot + transport.doh) / total) * 100).toFixed(0);
+}
+
 const PATH_DEFS = [
   { key: 'forwarded', label: 'Forward', cls: 'forward' },
   { key: 'recursive', label: 'Recursive', cls: 'recursive' },
@@ -918,20 +966,23 @@ const PATH_DEFS = [
 ];
 
 function renderPaths(queries) {
-  const total = queries.total || 1;
-  const container = document.getElementById('pathBars');
-  container.innerHTML = PATH_DEFS.map(p => {
-    const count = queries[p.key] || 0;
-    const pct = ((count / total) * 100).toFixed(1);
-    return `
-      <div class="path-bar-row">
-        <span class="path-label">${p.label}</span>
-        <div class="path-bar-track">
-          <div class="path-bar-fill ${p.cls}" style="width: ${pct}%"></div>
-        </div>
-        <span class="path-pct">${pct}%</span>
-      </div>`;
-  }).join('');
+  renderBarChart('pathBars', PATH_DEFS, queries, queries.total);
+}
+
+const TRANSPORT_DEFS = [
+  { key: 'udp', label: 'UDP',  cls: 'udp' },
+  { key: 'tcp', label: 'TCP',  cls: 'tcp' },
+  { key: 'dot', label: 'DoT',  cls: 'dot' },
+  { key: 'doh', label: 'DoH',  cls: 'doh' },
+];
+
+function renderTransport(transport) {
+  const total = (transport.udp + transport.tcp + transport.dot + transport.doh) || 1;
+  renderBarChart('transportBars', TRANSPORT_DEFS, transport, total);
+  const encPct = encryptionPct(transport);
+  const el = document.getElementById('transportEncrypted');
+  el.textContent = `${encPct}% encrypted`;
+  el.style.color = encPct >= 80 ? 'var(--emerald)' : encPct >= 50 ? 'var(--amber)' : 'var(--rose)';
 }
 
 function renderQueryLog(entries) {
@@ -942,6 +993,7 @@ function renderQueryLog(entries) {
 function applyLogFilter() {
   const domainFilter = document.getElementById('logFilterDomain').value.trim().toLowerCase();
   const pathFilter = document.getElementById('logFilterPath').value;
+  const transportFilter = document.getElementById('logFilterTransport').value;
 
   let filtered = lastLogEntries;
   if (domainFilter) {
@@ -949,6 +1001,9 @@ function applyLogFilter() {
   }
   if (pathFilter) {
     filtered = filtered.filter(e => e.path === pathFilter);
+  }
+  if (transportFilter) {
+    filtered = filtered.filter(e => e.transport === transportFilter);
   }
 
   const tbody = document.getElementById('queryLogBody');
@@ -967,6 +1022,7 @@ function applyLogFilter() {
       <td>${e.query_type}</td>
       <td class="domain-cell" title="${e.domain}">${e.domain}${allowBtn}</td>
       <td><span class="path-tag ${e.path}">${e.path}</span></td>
+      <td><span class="path-tag ${e.transport}">${e.transport}</span></td>
       <td style="white-space:nowrap;"><span style="display:inline-block;width:15px;text-align:center;">${e.dnssec === 'secure' ? '<svg title="DNSSEC verified" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--emerald)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>' : ''}</span>${e.rescode}</td>
       <td>${e.latency_ms.toFixed(1)}ms</td>
     </tr>`;
@@ -1141,11 +1197,13 @@ async function refresh() {
 
     // QPS calculation
     const now = Date.now();
+    const encPct = encryptionPct(stats.transport);
     if (prevTotal !== null && prevTime !== null) {
       const dt = (now - prevTime) / 1000;
       const dq = q.total - prevTotal;
       const qps = dt > 0 ? (dq / dt).toFixed(1) : '0.0';
-      document.getElementById('qps').textContent = `~${qps}/s`;
+      const encTag = q.total > 0 ? ` · ${encPct}% enc` : '';
+      document.getElementById('qps').textContent = `~${qps}/s${encTag}`;
     }
     prevTotal = q.total;
     prevTime = now;
@@ -1157,6 +1215,7 @@ async function refresh() {
 
     // Panels
     renderPaths(q);
+    renderTransport(stats.transport);
     renderQueryLog(logs);
     renderOverrides(overrides);
     renderCache(cache);

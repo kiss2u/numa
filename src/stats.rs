@@ -97,7 +97,30 @@ pub struct ServerStats {
     queries_local: u64,
     queries_overridden: u64,
     upstream_errors: u64,
+    transport_udp: u64,
+    transport_tcp: u64,
+    transport_dot: u64,
+    transport_doh: u64,
     started_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    Udp,
+    Tcp,
+    Dot,
+    Doh,
+}
+
+impl Transport {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Transport::Udp => "UDP",
+            Transport::Tcp => "TCP",
+            Transport::Dot => "DOT",
+            Transport::Doh => "DOH",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,11 +190,15 @@ impl ServerStats {
             queries_local: 0,
             queries_overridden: 0,
             upstream_errors: 0,
+            transport_udp: 0,
+            transport_tcp: 0,
+            transport_dot: 0,
+            transport_doh: 0,
             started_at: Instant::now(),
         }
     }
 
-    pub fn record(&mut self, path: QueryPath) -> u64 {
+    pub fn record(&mut self, path: QueryPath, transport: Transport) -> u64 {
         self.queries_total += 1;
         match path {
             QueryPath::Local => self.queries_local += 1,
@@ -182,6 +209,12 @@ impl ServerStats {
             QueryPath::Blocked => self.queries_blocked += 1,
             QueryPath::Overridden => self.queries_overridden += 1,
             QueryPath::UpstreamError => self.upstream_errors += 1,
+        }
+        match transport {
+            Transport::Udp => self.transport_udp += 1,
+            Transport::Tcp => self.transport_tcp += 1,
+            Transport::Dot => self.transport_dot += 1,
+            Transport::Doh => self.transport_doh += 1,
         }
         self.queries_total
     }
@@ -206,6 +239,10 @@ impl ServerStats {
             overridden: self.queries_overridden,
             blocked: self.queries_blocked,
             errors: self.upstream_errors,
+            transport_udp: self.transport_udp,
+            transport_tcp: self.transport_tcp,
+            transport_dot: self.transport_dot,
+            transport_doh: self.transport_doh,
         }
     }
 
@@ -242,4 +279,8 @@ pub struct StatsSnapshot {
     pub overridden: u64,
     pub blocked: u64,
     pub errors: u64,
+    pub transport_udp: u64,
+    pub transport_tcp: u64,
+    pub transport_dot: u64,
+    pub transport_doh: u64,
 }
