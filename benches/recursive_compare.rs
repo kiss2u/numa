@@ -403,6 +403,8 @@ fn run_server_comparison(
 ) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
+    // Unique prefix per process so re-runs don't hit stale cache entries
+    let run_id = std::process::id();
 
     let numa_addr: SocketAddr = NUMA_BENCH.parse().unwrap();
     let other: SocketAddr = other_addr.parse().unwrap();
@@ -412,6 +414,10 @@ fn run_server_comparison(
             eprintln!("{name} not responding on {addr}");
             std::process::exit(1);
         }
+    }
+
+    if cold {
+        flush_cache(); // flush Numa's record cache
     }
 
     println!("Warming up...");
@@ -433,7 +439,12 @@ fn run_server_comparison(
         other_name,
         &|domain| {
             let d = if cold {
-                format!("c{}.{}", COUNTER.fetch_add(1, Ordering::Relaxed), domain)
+                format!(
+                    "r{}-c{}.{}",
+                    run_id,
+                    COUNTER.fetch_add(1, Ordering::Relaxed),
+                    domain
+                )
             } else {
                 domain.to_string()
             };
@@ -443,7 +454,12 @@ fn run_server_comparison(
         },
         &|domain| {
             let d = if cold {
-                format!("c{}.{}", COUNTER.fetch_add(1, Ordering::Relaxed), domain)
+                format!(
+                    "r{}-c{}.{}",
+                    run_id,
+                    COUNTER.fetch_add(1, Ordering::Relaxed),
+                    domain
+                )
             } else {
                 domain.to_string()
             };
