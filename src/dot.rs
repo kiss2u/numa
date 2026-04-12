@@ -15,6 +15,7 @@ use crate::config::DotConfig;
 use crate::ctx::{resolve_query, ServerCtx};
 use crate::header::ResultCode;
 use crate::packet::DnsPacket;
+use crate::stats::Transport;
 
 const MAX_CONNECTIONS: usize = 512;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -201,7 +202,15 @@ async fn handle_dot_connection<S>(
             }
         };
 
-        match resolve_query(query.clone(), &buffer.buf[..msg_len], remote_addr, ctx).await {
+        match resolve_query(
+            query.clone(),
+            &buffer.buf[..msg_len],
+            remote_addr,
+            ctx,
+            Transport::Dot,
+        )
+        .await
+        {
             Ok(resp_buffer) => {
                 if write_framed(&mut stream, resp_buffer.filled())
                     .await

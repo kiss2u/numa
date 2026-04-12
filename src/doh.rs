@@ -10,6 +10,7 @@ use crate::buffer::BytePacketBuffer;
 use crate::ctx::{resolve_query, ServerCtx};
 use crate::header::ResultCode;
 use crate::packet::DnsPacket;
+use crate::stats::Transport;
 
 const MAX_DNS_MSG: usize = 4096;
 const DOH_CONTENT_TYPE: &str = "application/dns-message";
@@ -86,7 +87,7 @@ async fn resolve_doh(
     let query_rd = query.header.recursion_desired;
     let questions = query.questions.clone();
 
-    match resolve_query(query, dns_bytes, src, ctx).await {
+    match resolve_query(query, dns_bytes, src, ctx, Transport::Doh).await {
         Ok(resp_buffer) => {
             let min_ttl = extract_min_ttl(resp_buffer.filled());
             dns_response(resp_buffer.filled(), min_ttl)

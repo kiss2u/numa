@@ -27,7 +27,7 @@ use crate::question::QueryType;
 use crate::record::DnsRecord;
 use crate::service_store::ServiceStore;
 use crate::srtt::SrttCache;
-use crate::stats::{QueryPath, ServerStats};
+use crate::stats::{QueryPath, ServerStats, Transport};
 use crate::system_dns::ForwardingRule;
 
 pub struct ServerCtx {
@@ -87,6 +87,7 @@ pub async fn resolve_query(
     raw_wire: &[u8],
     src_addr: SocketAddr,
     ctx: &Arc<ServerCtx>,
+    transport: Transport,
 ) -> crate::Result<BytePacketBuffer> {
     let start = Instant::now();
 
@@ -354,7 +355,7 @@ pub async fn resolve_query(
     // Record stats and query log
     {
         let mut s = ctx.stats.lock().unwrap();
-        let total = s.record(path);
+        let total = s.record(path, transport);
         if total.is_multiple_of(1000) {
             s.log_summary();
         }
@@ -366,6 +367,7 @@ pub async fn resolve_query(
         domain: qname,
         query_type: qtype,
         path,
+        transport,
         rescode: response.header.rescode,
         latency_us: elapsed.as_micros() as u64,
         dnssec,
@@ -445,6 +447,7 @@ pub async fn handle_query(
     raw_len: usize,
     src_addr: SocketAddr,
     ctx: &Arc<ServerCtx>,
+    transport: Transport,
 ) -> crate::Result<()> {
     let query = match DnsPacket::from_buffer(&mut buffer) {
         Ok(packet) => packet,
@@ -453,7 +456,7 @@ pub async fn handle_query(
             return Ok(());
         }
     };
-    match resolve_query(query, &buffer.buf[..raw_len], src_addr, ctx).await {
+    match resolve_query(query, &buffer.buf[..raw_len], src_addr, ctx, transport).await {
         Ok(resp_buffer) => {
             ctx.socket.send_to(resp_buffer.filled(), src_addr).await?;
         }

@@ -15,7 +15,7 @@ use numa::forward::{parse_upstream, Upstream, UpstreamPool};
 use numa::override_store::OverrideStore;
 use numa::query_log::QueryLog;
 use numa::service_store::ServiceStore;
-use numa::stats::ServerStats;
+use numa::stats::{ServerStats, Transport};
 use numa::system_dns::{
     discover_system_dns, install_service, restart_service, service_status, uninstall_service,
 };
@@ -610,7 +610,7 @@ async fn main() -> numa::Result<()> {
         };
         let ctx = Arc::clone(&ctx);
         tokio::spawn(async move {
-            if let Err(e) = handle_query(buffer, len, src_addr, &ctx).await {
+            if let Err(e) = handle_query(buffer, len, src_addr, &ctx, Transport::Udp).await {
                 error!("{} | HANDLER ERROR | {}", src_addr, e);
             }
         });
