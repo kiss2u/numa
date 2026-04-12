@@ -360,9 +360,11 @@ pub async fn forward_with_failover_raw(
 
     for upstream in &all_upstreams {
         let start = Instant::now();
-        let result = if !hedge_delay.is_zero() && matches!(upstream, Upstream::Doh { .. }) {
-            // Hedge against the same upstream: parallel h2 streams on same
-            // connection. Independent stream scheduling rescues dispatch spikes.
+        let result = if !hedge_delay.is_zero() {
+            // Hedge against the same upstream: independent h2 streams (DoH),
+            // independent UDP packets (plain DNS), or independent TLS
+            // connections (DoT). Rescues packet loss, dispatch spikes, and
+            // TLS handshake stalls.
             forward_with_hedging_raw(wire, upstream, upstream, hedge_delay, timeout_duration).await
         } else {
             forward_query_raw(wire, upstream, timeout_duration).await
