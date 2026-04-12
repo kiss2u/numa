@@ -5,7 +5,8 @@ api_bind_addr = "127.0.0.1"
 data_dir = "/tmp/numa-bench"
 
 [upstream]
-mode = "recursive"
+mode = "forward"
+address = ["https://9.9.9.9/dns-query"]
 timeout_ms = 10000
 
 [cache]
@@ -15,8 +16,13 @@ max_ttl = 3600
 [blocking]
 enabled = false
 
+[proxy]
+port = 8080
+tls_port = 8443
+
 [dot]
-enabled = false
+enabled = true
+port = 8530
 
 [mobile]
 enabled = false

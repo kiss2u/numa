@@ -214,15 +214,11 @@ pub async fn forward_query(
     upstream: &Upstream,
     timeout_duration: Duration,
 ) -> Result<DnsPacket> {
-    match upstream {
-        Upstream::Udp(addr) => forward_udp(query, *addr, timeout_duration).await,
-        Upstream::Doh { url, client } => forward_doh(query, url, client, timeout_duration).await,
-        Upstream::Dot {
-            addr,
-            tls_name,
-            connector,
-        } => forward_dot(query, *addr, tls_name, connector, timeout_duration).await,
-    }
+    let mut send_buffer = BytePacketBuffer::new();
+    query.write(&mut send_buffer)?;
+    let data = forward_query_raw(send_buffer.filled(), upstream, timeout_duration).await?;
+    let mut recv_buffer = BytePacketBuffer::from_bytes(&data);
+    DnsPacket::from_buffer(&mut recv_buffer)
 }
 
 pub(crate) async fn forward_udp(
@@ -284,13 +280,13 @@ pub(crate) async fn forward_tcp(
     DnsPacket::from_buffer(&mut recv_buffer)
 }
 
-async fn forward_dot(
-    query: &DnsPacket,
+async fn forward_dot_raw(
+    wire: &[u8],
     addr: SocketAddr,
     tls_name: &Option<String>,
     connector: &tokio_rustls::TlsConnector,
     timeout_duration: Duration,
-) -> Result<DnsPacket> {
+) -> Result<Vec<u8>> {
     use rustls::pki_types::ServerName;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -302,10 +298,6 @@ async fn forward_dot(
 
     let tcp = timeout(timeout_duration, TcpStream::connect(addr)).await??;
     let mut tls = timeout(timeout_duration, connector.connect(server_name, tcp)).await??;
-
-    let mut send_buffer = BytePacketBuffer::new();
-    query.write(&mut send_buffer)?;
-    let wire = send_buffer.filled();
 
     let mut outbuf = Vec::with_capacity(2 + wire.len());
     outbuf.extend_from_slice(&(wire.len() as u16).to_be_bytes());
@@ -319,22 +311,7 @@ async fn forward_dot(
     let mut data = vec![0u8; resp_len];
     timeout(timeout_duration, tls.read_exact(&mut data)).await??;
 
-    let mut recv_buffer = BytePacketBuffer::from_bytes(&data);
-    DnsPacket::from_buffer(&mut recv_buffer)
-}
-
-async fn forward_doh(
-    query: &DnsPacket,
-    url: &str,
-    client: &reqwest::Client,
-    timeout_duration: Duration,
-) -> Result<DnsPacket> {
-    let mut send_buffer = BytePacketBuffer::new();
-    query.write(&mut send_buffer)?;
-
-    let resp_bytes = forward_doh_raw(send_buffer.filled(), url, client, timeout_duration).await?;
-    let mut recv_buffer = BytePacketBuffer::from_bytes(&resp_bytes);
-    DnsPacket::from_buffer(&mut recv_buffer)
+    Ok(data)
 }
 
 pub async fn forward_query_raw(
@@ -345,6 +322,11 @@ pub async fn forward_query_raw(
     match upstream {
         Upstream::Udp(addr) => forward_udp_raw(wire, *addr, timeout_duration).await,
         Upstream::Doh { url, client } => forward_doh_raw(wire, url, client, timeout_duration).await,
+        Upstream::Dot {
+            addr,
+            tls_name,
+            connector,
+        } => forward_dot_raw(wire, *addr, tls_name, connector, timeout_duration).await,
     }
 }
 
@@ -405,7 +387,10 @@ pub async fn forward_with_hedging_raw(
 
         match (primary_err, secondary_err) {
             (Some(pe), Some(_)) => return Err(pe),
-            (pe, se) => { primary_err = pe; secondary_err = se; }
+            (pe, se) => {
+                primary_err = pe;
+                secondary_err = se;
+            }
         }
     }
 }
@@ -516,7 +501,7 @@ pub async fn keepalive_doh(upstream: &Upstream) {
             0x01, 0x00, // flags: RD=1
             0x00, 0x01, // QDCOUNT=1
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // AN=0, NS=0, AR=0
-            0x00,       // root name (.)
+            0x00, // root name (.)
             0x00, 0x02, // type NS
             0x00, 0x01, // class IN
         ];

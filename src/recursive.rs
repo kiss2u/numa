@@ -15,8 +15,8 @@ use crate::srtt::SrttCache;
 
 const MAX_REFERRAL_DEPTH: u8 = 10;
 const MAX_CNAME_DEPTH: u8 = 8;
-const NS_QUERY_TIMEOUT: Duration = Duration::from_millis(800);
-const TCP_TIMEOUT: Duration = Duration::from_millis(1500);
+const NS_QUERY_TIMEOUT: Duration = Duration::from_millis(400);
+const TCP_TIMEOUT: Duration = Duration::from_millis(400);
 const UDP_FAIL_THRESHOLD: u8 = 3;
 
 static QUERY_ID: AtomicU16 = AtomicU16::new(1);
@@ -213,11 +213,13 @@ pub(crate) fn resolve_iterative<'a>(
                 ns_addrs[ns_idx], q_type, q_name, current_zone, referral_depth
             );
 
-            let response = match send_query_hedged(q_name, q_type, &ns_addrs[ns_idx..], srtt).await {
+            let response = match send_query_hedged(q_name, q_type, &ns_addrs[ns_idx..], srtt).await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     debug!("recursive: NS query failed: {}", e);
-                    ns_idx += 2; // both tried, skip past them
+                    let remaining = ns_addrs.len().saturating_sub(ns_idx);
+                    ns_idx += remaining.min(2);
                     continue;
                 }
             };
@@ -660,7 +662,10 @@ async fn send_query_hedged(
             }
             match (a_err.take(), b_err.take()) {
                 (Some(e), Some(_)) => return Err(e),
-                (a, b) => { a_err = a; b_err = b; }
+                (a, b) => {
+                    a_err = a;
+                    b_err = b;
+                }
             }
         }
     } else {
@@ -739,9 +744,13 @@ async fn send_query(
                     "send_query: {} consecutive UDP failures — switching to TCP-first",
                     fails
                 );
+                // Now that UDP is disabled, retry this query via TCP
+                return tcp_with_srtt(&query, server, srtt, start).await;
             }
-            debug!("send_query: UDP failed for {}: {}, trying TCP", server, e);
-            tcp_with_srtt(&query, server, srtt, start).await
+            // UDP works in general (priming succeeded) but this server timed out.
+            // Don't waste another 400ms on TCP — the server is unreachable.
+            srtt.write().unwrap().record_failure(server.ip());
+            Err(e)
         }
     }
 }
@@ -1021,10 +1030,10 @@ mod tests {
     }
 
     /// TCP-only server returns authoritative answer directly.
-    /// Verifies: UDP fails → TCP fallback → resolves.
+    /// Verifies: when UDP is disabled, TCP-first resolves.
     #[tokio::test]
     async fn tcp_fallback_resolves_when_udp_blocked() {
-        UDP_DISABLED.store(false, Ordering::Relaxed);
+        UDP_DISABLED.store(true, Ordering::Relaxed);
         UDP_FAILURES.store(0, Ordering::Release);
 
         let server_addr = spawn_tcp_dns_server(|query| {
@@ -1107,7 +1116,7 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_fallback_handles_nxdomain() {
-        UDP_DISABLED.store(false, Ordering::Relaxed);
+        UDP_DISABLED.store(true, Ordering::Relaxed);
         UDP_FAILURES.store(0, Ordering::Release);
 
         let server_addr = spawn_tcp_dns_server(|query| {
