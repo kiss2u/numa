@@ -33,6 +33,39 @@ pub struct Config {
     pub dot: DotConfig,
     #[serde(default)]
     pub mobile: MobileConfig,
+    #[serde(default)]
+    pub forwarding: Vec<ForwardingRuleConfig>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct ForwardingRuleConfig {
+    #[serde(deserialize_with = "string_or_vec")]
+    pub suffix: Vec<String>,
+    pub upstream: String,
+}
+
+impl ForwardingRuleConfig {
+    fn to_runtime_rules(&self) -> Result<Vec<crate::system_dns::ForwardingRule>> {
+        let addr = crate::forward::parse_upstream_addr(&self.upstream, 53)
+            .map_err(|e| format!("forwarding rule for upstream '{}': {}", self.upstream, e))?;
+        Ok(self
+            .suffix
+            .iter()
+            .map(|s| crate::system_dns::ForwardingRule::new(s.clone(), addr))
+            .collect())
+    }
+}
+
+pub fn merge_forwarding_rules(
+    config_rules: &[ForwardingRuleConfig],
+    discovered: Vec<crate::system_dns::ForwardingRule>,
+) -> Result<Vec<crate::system_dns::ForwardingRule>> {
+    let mut merged: Vec<crate::system_dns::ForwardingRule> = Vec::new();
+    for rule in config_rules {
+        merged.extend(rule.to_runtime_rules()?);
+    }
+    merged.extend(discovered);
+    Ok(merged)
 }
 
 #[derive(Deserialize)]
@@ -584,6 +617,157 @@ mod tests {
         let config: Config = toml::from_str("").unwrap();
         assert!(config.upstream.address.is_empty());
         assert!(config.upstream.fallback.is_empty());
+    }
+
+    // ── issue #82: [[forwarding]] config section ────────────────────────
+
+    #[test]
+    fn forwarding_empty_by_default() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.forwarding.is_empty());
+    }
+
+    #[test]
+    fn forwarding_parses_single_rule() {
+        let toml = r#"
+            [[forwarding]]
+            suffix = "home.local"
+            upstream = "100.90.1.63:5361"
+        "#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.forwarding.len(), 1);
+        assert_eq!(config.forwarding[0].suffix, &["home.local"]);
+        assert_eq!(config.forwarding[0].upstream, "100.90.1.63:5361");
+    }
+
+    #[test]
+    fn forwarding_parses_reverse_dns_zone() {
+        let toml = r#"
+            [[forwarding]]
+            suffix = "168.192.in-addr.arpa"
+            upstream = "100.90.1.63:5361"
+        "#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.forwarding.len(), 1);
+        assert_eq!(config.forwarding[0].suffix, &["168.192.in-addr.arpa"]);
+    }
+
+    #[test]
+    fn forwarding_parses_multiple_rules() {
+        let toml = r#"
+            [[forwarding]]
+            suffix = "168.192.in-addr.arpa"
+            upstream = "100.90.1.63:5361"
+
+            [[forwarding]]
+            suffix = "home.local"
+            upstream = "10.0.0.1"
+        "#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.forwarding.len(), 2);
+        assert_eq!(config.forwarding[1].upstream, "10.0.0.1");
+    }
+
+    #[test]
+    fn forwarding_parses_suffix_array() {
+        let toml = r#"
+            [[forwarding]]
+            suffix = ["168.192.in-addr.arpa", "onsite"]
+            upstream = "192.168.88.1"
+        "#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.forwarding.len(), 1);
+        assert_eq!(
+            config.forwarding[0].suffix,
+            &["168.192.in-addr.arpa", "onsite"]
+        );
+    }
+
+    #[test]
+    fn forwarding_suffix_array_expands_to_multiple_runtime_rules() {
+        let rule = ForwardingRuleConfig {
+            suffix: vec!["168.192.in-addr.arpa".to_string(), "onsite".to_string()],
+            upstream: "192.168.88.1".to_string(),
+        };
+        let runtime = rule.to_runtime_rules().unwrap();
+        assert_eq!(runtime.len(), 2);
+        assert_eq!(runtime[0].suffix, "168.192.in-addr.arpa");
+        assert_eq!(runtime[1].suffix, "onsite");
+        assert_eq!(runtime[0].upstream, runtime[1].upstream);
+    }
+
+    #[test]
+    fn forwarding_upstream_with_explicit_port() {
+        let rule = ForwardingRuleConfig {
+            suffix: vec!["home.local".to_string()],
+            upstream: "100.90.1.63:5361".to_string(),
+        };
+        let runtime = rule.to_runtime_rules().unwrap();
+        assert_eq!(runtime.len(), 1);
+        assert_eq!(runtime[0].upstream.to_string(), "100.90.1.63:5361");
+        assert_eq!(runtime[0].suffix, "home.local");
+    }
+
+    #[test]
+    fn forwarding_upstream_defaults_to_port_53() {
+        let rule = ForwardingRuleConfig {
+            suffix: vec!["home.local".to_string()],
+            upstream: "100.90.1.63".to_string(),
+        };
+        let runtime = rule.to_runtime_rules().unwrap();
+        assert_eq!(runtime[0].upstream.to_string(), "100.90.1.63:53");
+    }
+
+    #[test]
+    fn forwarding_invalid_upstream_returns_error() {
+        let rule = ForwardingRuleConfig {
+            suffix: vec!["home.local".to_string()],
+            upstream: "not-a-valid-host".to_string(),
+        };
+        assert!(rule.to_runtime_rules().is_err());
+    }
+
+    #[test]
+    fn forwarding_config_rules_take_precedence_over_discovered() {
+        let config_rules = vec![ForwardingRuleConfig {
+            suffix: vec!["home.local".to_string()],
+            upstream: "10.0.0.1:53".to_string(),
+        }];
+        let discovered = vec![crate::system_dns::ForwardingRule::new(
+            "home.local".to_string(),
+            "192.168.1.1:53".parse().unwrap(),
+        )];
+        let merged = merge_forwarding_rules(&config_rules, discovered).unwrap();
+        let picked = crate::system_dns::match_forwarding_rule("host.home.local", &merged)
+            .expect("rule should match");
+        assert_eq!(picked.to_string(), "10.0.0.1:53");
+    }
+
+    #[test]
+    fn forwarding_merge_preserves_non_overlapping_discovered() {
+        let config_rules = vec![ForwardingRuleConfig {
+            suffix: vec!["home.local".to_string()],
+            upstream: "10.0.0.1:53".to_string(),
+        }];
+        let discovered = vec![crate::system_dns::ForwardingRule::new(
+            "corp.example".to_string(),
+            "192.168.1.1:53".parse().unwrap(),
+        )];
+        let merged = merge_forwarding_rules(&config_rules, discovered).unwrap();
+        assert_eq!(merged.len(), 2);
+        let picked = crate::system_dns::match_forwarding_rule("host.corp.example", &merged)
+            .expect("discovered rule should still match");
+        assert_eq!(picked.to_string(), "192.168.1.1:53");
+    }
+
+    #[test]
+    fn forwarding_merge_suffix_array_expands_to_multiple_rules() {
+        let config_rules = vec![ForwardingRuleConfig {
+            suffix: vec!["a.local".to_string(), "b.local".to_string()],
+            upstream: "10.0.0.1:53".to_string(),
+        }];
+        let merged = merge_forwarding_rules(&config_rules, vec![]).unwrap();
+        assert_eq!(merged.len(), 2);
     }
 }
 
