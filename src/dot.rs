@@ -153,8 +153,11 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, ctx: Arc<Serv
 
 /// Handle a single persistent DoT connection (RFC 7858).
 /// Reads length-prefixed DNS queries until EOF, idle timeout, or error.
-async fn handle_dot_connection<S>(mut stream: S, remote_addr: SocketAddr, ctx: &ServerCtx)
-where
+async fn handle_dot_connection<S>(
+    mut stream: S,
+    remote_addr: SocketAddr,
+    ctx: &std::sync::Arc<ServerCtx>,
+) where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
     loop {

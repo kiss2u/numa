@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use arc_swap::ArcSwap;
@@ -84,7 +84,7 @@ pub async fn resolve_query(
     query: DnsPacket,
     raw_wire: &[u8],
     src_addr: SocketAddr,
-    ctx: &ServerCtx,
+    ctx: &Arc<ServerCtx>,
 ) -> crate::Result<BytePacketBuffer> {
     let start = Instant::now();
 
@@ -166,7 +166,12 @@ pub async fn resolve_query(
             (resp, QueryPath::Blocked, DnssecStatus::Indeterminate)
         } else {
             let cached = ctx.cache.read().unwrap().lookup_with_status(&qname, qtype);
-            if let Some((cached, cached_dnssec)) = cached {
+            if let Some((cached, cached_dnssec, stale)) = cached {
+                if stale {
+                    let ctx = Arc::clone(ctx);
+                    let qname = qname.clone();
+                    tokio::spawn(async move { warm_stale(&ctx, &qname, qtype).await });
+                }
                 let mut resp = cached;
                 resp.header.id = query.header.id;
                 if cached_dnssec == DnssecStatus::Secure {
@@ -375,6 +380,46 @@ fn cache_and_parse(
     DnsPacket::from_buffer(&mut buf)
 }
 
+/// Background refresh for a stale cache entry (RFC 8767 revalidation).
+async fn warm_stale(ctx: &ServerCtx, qname: &str, qtype: QueryType) {
+    let query = DnsPacket::query(0, qname, qtype);
+    if ctx.upstream_mode == UpstreamMode::Recursive {
+        if let Ok(resp) = crate::recursive::resolve_recursive(
+            qname,
+            qtype,
+            &ctx.cache,
+            &query,
+            &ctx.root_hints,
+            &ctx.srtt,
+        )
+        .await
+        {
+            ctx.cache.write().unwrap().insert(qname, qtype, &resp);
+        }
+    } else {
+        let mut buf = BytePacketBuffer::new();
+        if query.write(&mut buf).is_ok() {
+            let pool = ctx.upstream_pool.lock().unwrap().clone();
+            if let Ok(wire) = forward_with_failover_raw(
+                buf.filled(),
+                &pool,
+                &ctx.srtt,
+                ctx.timeout,
+                ctx.hedge_delay,
+            )
+            .await
+            {
+                ctx.cache.write().unwrap().insert_wire(
+                    qname,
+                    qtype,
+                    &wire,
+                    DnssecStatus::Indeterminate,
+                );
+            }
+        }
+    }
+}
+
 async fn forward_and_cache(
     wire: &[u8],
     upstream: &Upstream,
@@ -390,7 +435,7 @@ pub async fn handle_query(
     mut buffer: BytePacketBuffer,
     raw_len: usize,
     src_addr: SocketAddr,
-    ctx: &ServerCtx,
+    ctx: &Arc<ServerCtx>,
 ) -> crate::Result<()> {
     let raw_wire = buffer.buf[..raw_len].to_vec();
     let query = match DnsPacket::from_buffer(&mut buffer) {

@@ -60,7 +60,11 @@ fn is_doh_host(host: Option<&str>, tld: &str) -> bool {
     }
 }
 
-async fn resolve_doh(dns_bytes: &[u8], src: SocketAddr, ctx: &ServerCtx) -> Response {
+async fn resolve_doh(
+    dns_bytes: &[u8],
+    src: SocketAddr,
+    ctx: &std::sync::Arc<ServerCtx>,
+) -> Response {
     let mut buffer = BytePacketBuffer::from_bytes(dns_bytes);
     let query = match DnsPacket::from_buffer(&mut buffer) {
         Ok(q) => q,

@@ -132,18 +132,19 @@ impl DnsCache {
 
     /// Read-only lookup — expired entries are left in place (cleaned up on insert).
     pub fn lookup(&self, domain: &str, qtype: QueryType) -> Option<DnsPacket> {
-        self.lookup_with_status(domain, qtype).map(|(pkt, _)| pkt)
+        self.lookup_with_status(domain, qtype)
+            .map(|(pkt, _, _)| pkt)
     }
 
     pub fn lookup_with_status(
         &self,
         domain: &str,
         qtype: QueryType,
-    ) -> Option<(DnsPacket, DnssecStatus)> {
-        let (wire, status, _stale) = self.lookup_wire(domain, qtype, 0)?;
+    ) -> Option<(DnsPacket, DnssecStatus, bool)> {
+        let (wire, status, stale) = self.lookup_wire(domain, qtype, 0)?;
         let mut buf = BytePacketBuffer::from_bytes(&wire);
         let pkt = DnsPacket::from_buffer(&mut buf).ok()?;
-        Some((pkt, status))
+        Some((pkt, status, stale))
     }
 
     pub fn insert(&mut self, domain: &str, qtype: QueryType, packet: &DnsPacket) {
