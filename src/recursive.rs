@@ -16,7 +16,7 @@ use crate::srtt::SrttCache;
 const MAX_REFERRAL_DEPTH: u8 = 10;
 const MAX_CNAME_DEPTH: u8 = 8;
 const NS_QUERY_TIMEOUT: Duration = Duration::from_millis(400);
-const TCP_TIMEOUT: Duration = Duration::from_millis(400);
+const TCP_TIMEOUT: Duration = Duration::from_millis(800);
 const UDP_FAIL_THRESHOLD: u8 = 3;
 
 static QUERY_ID: AtomicU16 = AtomicU16::new(1);
