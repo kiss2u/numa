@@ -70,9 +70,7 @@ fn strip_port(h: &str) -> Option<&str> {
         if base.contains(':') {
             return None;
         }
-        port.bytes()
-            .all(|b| b.is_ascii_digit())
-            .then_some(base)
+        port.bytes().all(|b| b.is_ascii_digit()).then_some(base)
     }
 }
 
