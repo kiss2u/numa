@@ -309,7 +309,11 @@ mod tests {
 
     #[test]
     fn scan_single_a_record() {
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         let wire = to_wire(&pkt);
         let meta = scan_ttl_offsets(&wire).unwrap();
 
@@ -341,15 +345,20 @@ mod tests {
         let ttls: Vec<u32> = meta
             .ttl_offsets
             .iter()
-            .map(|&off| u32::from_be_bytes([wire[off], wire[off + 1], wire[off + 2], wire[off + 3]]))
+            .map(|&off| {
+                u32::from_be_bytes([wire[off], wire[off + 1], wire[off + 2], wire[off + 3]])
+            })
             .collect();
         assert_eq!(ttls, vec![300, 600, 120]);
     }
 
     #[test]
     fn scan_mixed_sections() {
-        let mut pkt =
-            response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let mut pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         pkt.authorities
             .push(ns_record("example.com", "ns1.example.com", 3600));
         pkt.authorities
@@ -382,7 +391,9 @@ mod tests {
         let ttls: Vec<u32> = meta
             .ttl_offsets
             .iter()
-            .map(|&off| u32::from_be_bytes([wire[off], wire[off + 1], wire[off + 2], wire[off + 3]]))
+            .map(|&off| {
+                u32::from_be_bytes([wire[off], wire[off + 1], wire[off + 2], wire[off + 3]])
+            })
             .collect();
         assert_eq!(ttls, vec![300, 600]);
     }
@@ -410,15 +421,20 @@ mod tests {
         let ttls: Vec<u32> = meta
             .ttl_offsets
             .iter()
-            .map(|&off| u32::from_be_bytes([wire[off], wire[off + 1], wire[off + 2], wire[off + 3]]))
+            .map(|&off| {
+                u32::from_be_bytes([wire[off], wire[off + 1], wire[off + 2], wire[off + 3]])
+            })
             .collect();
         assert_eq!(ttls, vec![300, 600]);
     }
 
     #[test]
     fn scan_edns_opt_excluded() {
-        let mut pkt =
-            response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let mut pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         pkt.edns = Some(EdnsOpt {
             udp_payload_size: 1232,
             extended_rcode: 0,
@@ -436,8 +452,11 @@ mod tests {
 
     #[test]
     fn scan_rrsig_only_wire_ttl() {
-        let mut pkt =
-            response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let mut pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         pkt.answers.push(DnsRecord::RRSIG {
             domain: "example.com".into(),
             type_covered: 1, // A
@@ -460,8 +479,7 @@ mod tests {
 
         // Both wire TTLs should be 300, not 9999
         for &off in &meta.ttl_offsets {
-            let ttl =
-                u32::from_be_bytes([wire[off], wire[off + 1], wire[off + 2], wire[off + 3]]);
+            let ttl = u32::from_be_bytes([wire[off], wire[off + 1], wire[off + 2], wire[off + 3]]);
             assert_eq!(ttl, 300);
         }
 
@@ -479,8 +497,11 @@ mod tests {
 
     #[test]
     fn scan_nsec_variable_rdata() {
-        let mut pkt =
-            response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let mut pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         pkt.authorities.push(DnsRecord::NSEC {
             domain: "example.com".into(),
             next_domain: "z.example.com".into(),
@@ -534,7 +555,11 @@ mod tests {
 
     #[test]
     fn scan_truncated_wire_returns_error() {
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         let wire = to_wire(&pkt);
         // Truncate mid-record
         let truncated = &wire[..wire.len() - 2];
@@ -558,7 +583,11 @@ mod tests {
 
     #[test]
     fn patch_ttl_single() {
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         let mut wire = to_wire(&pkt);
         let meta = scan_ttl_offsets(&wire).unwrap();
 
@@ -597,7 +626,11 @@ mod tests {
 
     #[test]
     fn patch_ttl_preserves_other_bytes() {
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         let original = to_wire(&pkt);
         let mut patched = original.clone();
         let meta = scan_ttl_offsets(&patched).unwrap();
@@ -606,10 +639,7 @@ mod tests {
 
         // Every byte outside TTL offsets should be identical
         for (i, (&orig, &patc)) in original.iter().zip(patched.iter()).enumerate() {
-            let in_ttl = meta
-                .ttl_offsets
-                .iter()
-                .any(|&off| i >= off && i < off + 4);
+            let in_ttl = meta.ttl_offsets.iter().any(|&off| i >= off && i < off + 4);
             if !in_ttl {
                 assert_eq!(
                     orig, patc,
@@ -622,7 +652,11 @@ mod tests {
 
     #[test]
     fn patch_ttl_zero() {
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         let mut wire = to_wire(&pkt);
         let meta = scan_ttl_offsets(&wire).unwrap();
 
@@ -634,7 +668,11 @@ mod tests {
 
     #[test]
     fn patch_ttl_max_u32() {
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         let mut wire = to_wire(&pkt);
         let meta = scan_ttl_offsets(&wire).unwrap();
 
@@ -646,8 +684,11 @@ mod tests {
 
     #[test]
     fn patch_ttl_edns_untouched() {
-        let mut pkt =
-            response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let mut pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         pkt.edns = Some(EdnsOpt {
             udp_payload_size: 1232,
             extended_rcode: 0,
@@ -664,10 +705,7 @@ mod tests {
         // Only the A record's TTL bytes should differ; everything else
         // (including the OPT "TTL" containing the DO bit) must be unchanged.
         for (i, (&orig, &patc)) in original.iter().zip(patched.iter()).enumerate() {
-            let in_ttl = meta
-                .ttl_offsets
-                .iter()
-                .any(|&off| i >= off && i < off + 4);
+            let in_ttl = meta.ttl_offsets.iter().any(|&off| i >= off && i < off + 4);
             if !in_ttl {
                 assert_eq!(
                     orig, patc,
@@ -682,7 +720,11 @@ mod tests {
 
     #[test]
     fn patch_id_basic() {
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         let mut wire = to_wire(&pkt);
 
         patch_id(&mut wire, 0xABCD);
@@ -691,7 +733,11 @@ mod tests {
 
     #[test]
     fn patch_id_preserves_flags() {
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         let original = to_wire(&pkt);
         let mut patched = original.clone();
 
@@ -703,7 +749,11 @@ mod tests {
 
     #[test]
     fn patch_id_zero() {
-        let pkt = response(0xFFFF, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0xFFFF,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         let mut wire = to_wire(&pkt);
 
         patch_id(&mut wire, 0x0000);
@@ -782,7 +832,11 @@ mod tests {
 
     #[test]
     fn round_trip_simple_a() {
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         let wire = to_wire(&pkt);
         let meta = scan_ttl_offsets(&wire).unwrap();
 
@@ -808,8 +862,11 @@ mod tests {
 
     #[test]
     fn round_trip_edns_survives() {
-        let mut pkt =
-            response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let mut pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         pkt.edns = Some(EdnsOpt {
             udp_payload_size: 1232,
             extended_rcode: 0,
@@ -1017,7 +1074,11 @@ mod tests {
     #[test]
     fn cache_insert_lookup_hit() {
         let mut cache = DnsCache::new(100, 1, 3600);
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         cache.insert("example.com", QueryType::A, &pkt);
 
         let (result, status) = cache
@@ -1030,10 +1091,16 @@ mod tests {
     #[test]
     fn cache_lookup_adjusts_ttl() {
         let mut cache = DnsCache::new(100, 1, 3600);
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         cache.insert("example.com", QueryType::A, &pkt);
 
-        let (result, _) = cache.lookup_with_status("example.com", QueryType::A).unwrap();
+        let (result, _) = cache
+            .lookup_with_status("example.com", QueryType::A)
+            .unwrap();
         // TTL should be <= 300 (at most original, reduced by elapsed time)
         assert!(result.answers[0].ttl() <= 300);
         assert!(result.answers[0].ttl() > 0);
@@ -1042,7 +1109,11 @@ mod tests {
     #[test]
     fn cache_miss_wrong_domain() {
         let mut cache = DnsCache::new(100, 1, 3600);
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         cache.insert("example.com", QueryType::A, &pkt);
 
         assert!(cache
@@ -1053,7 +1124,11 @@ mod tests {
     #[test]
     fn cache_miss_wrong_qtype() {
         let mut cache = DnsCache::new(100, 1, 3600);
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         cache.insert("example.com", QueryType::A, &pkt);
 
         assert!(cache
@@ -1064,8 +1139,16 @@ mod tests {
     #[test]
     fn cache_overwrite_no_double_count() {
         let mut cache = DnsCache::new(100, 1, 3600);
-        let pkt1 = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
-        let pkt2 = response(0x5678, "example.com", vec![a_record("example.com", "5.6.7.8", 600)]);
+        let pkt1 = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
+        let pkt2 = response(
+            0x5678,
+            "example.com",
+            vec![a_record("example.com", "5.6.7.8", 600)],
+        );
 
         cache.insert("example.com", QueryType::A, &pkt1);
         assert_eq!(cache.len(), 1);
@@ -1073,7 +1156,9 @@ mod tests {
         cache.insert("example.com", QueryType::A, &pkt2);
         assert_eq!(cache.len(), 1); // no double count
 
-        let (result, _) = cache.lookup_with_status("example.com", QueryType::A).unwrap();
+        let (result, _) = cache
+            .lookup_with_status("example.com", QueryType::A)
+            .unwrap();
         match &result.answers[0] {
             DnsRecord::A { addr, .. } => {
                 assert_eq!(*addr, "5.6.7.8".parse::<std::net::Ipv4Addr>().unwrap())
@@ -1085,7 +1170,11 @@ mod tests {
     #[test]
     fn cache_ttl_clamped_min() {
         let mut cache = DnsCache::new(100, 60, 3600);
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 5)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 5)],
+        );
         cache.insert("example.com", QueryType::A, &pkt);
 
         let (remaining, total) = cache.ttl_remaining("example.com", QueryType::A).unwrap();
@@ -1096,8 +1185,11 @@ mod tests {
     #[test]
     fn cache_ttl_clamped_max() {
         let mut cache = DnsCache::new(100, 1, 3600);
-        let pkt =
-            response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 999999)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 999999)],
+        );
         cache.insert("example.com", QueryType::A, &pkt);
 
         let (_, total) = cache.ttl_remaining("example.com", QueryType::A).unwrap();
@@ -1110,7 +1202,11 @@ mod tests {
         assert!(cache.is_empty());
         assert_eq!(cache.len(), 0);
 
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         cache.insert("example.com", QueryType::A, &pkt);
         assert!(!cache.is_empty());
         assert_eq!(cache.len(), 1);
@@ -1124,7 +1220,11 @@ mod tests {
     #[test]
     fn cache_remove_domain() {
         let mut cache = DnsCache::new(100, 1, 3600);
-        let pkt_a = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt_a = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         let pkt_aaaa = response(
             0x5678,
             "example.com",
@@ -1143,8 +1243,16 @@ mod tests {
     #[test]
     fn cache_list_entries() {
         let mut cache = DnsCache::new(100, 1, 3600);
-        let pkt_a = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
-        let pkt_b = response(0x5678, "test.org", vec![a_record("test.org", "5.6.7.8", 600)]);
+        let pkt_a = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
+        let pkt_b = response(
+            0x5678,
+            "test.org",
+            vec![a_record("test.org", "5.6.7.8", 600)],
+        );
         cache.insert("example.com", QueryType::A, &pkt_a);
         cache.insert("test.org", QueryType::A, &pkt_b);
 
@@ -1160,7 +1268,11 @@ mod tests {
         let mut cache = DnsCache::new(100, 1, 3600);
         let empty = cache.heap_bytes();
 
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         cache.insert("example.com", QueryType::A, &pkt);
         assert!(cache.heap_bytes() > empty);
     }
@@ -1173,7 +1285,11 @@ mod tests {
         assert!(cache.needs_warm("example.com"));
 
         // Both A and AAAA cached → does not need warm
-        let pkt_a = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt_a = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         let pkt_aaaa = response(
             0x5678,
             "example.com",
@@ -1194,7 +1310,11 @@ mod tests {
         let mut cache = DnsCache::new(100, 60, 3600);
         assert!(cache.ttl_remaining("missing.com", QueryType::A).is_none());
 
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         cache.insert("example.com", QueryType::A, &pkt);
         let (remaining, total) = cache.ttl_remaining("example.com", QueryType::A).unwrap();
         assert_eq!(total, 300);
@@ -1205,7 +1325,11 @@ mod tests {
     #[test]
     fn cache_dnssec_status_preserved() {
         let mut cache = DnsCache::new(100, 1, 3600);
-        let pkt = response(0x1234, "example.com", vec![a_record("example.com", "1.2.3.4", 300)]);
+        let pkt = response(
+            0x1234,
+            "example.com",
+            vec![a_record("example.com", "1.2.3.4", 300)],
+        );
         cache.insert_with_status("example.com", QueryType::A, &pkt, DnssecStatus::Secure);
 
         let (_, status) = cache
@@ -1225,7 +1349,9 @@ mod tests {
         let mut cache = DnsCache::new(1000, 1, 3600);
 
         // Simulate a realistic cache: 50 domains, mix of record types
-        let domains: Vec<String> = (0..50).map(|i| format!("domain{}.example.com", i)).collect();
+        let domains: Vec<String> = (0..50)
+            .map(|i| format!("domain{}.example.com", i))
+            .collect();
 
         let mut total_wire_bytes = 0usize;
         let mut total_wire_meta_bytes = 0usize;
@@ -1259,8 +1385,7 @@ mod tests {
                 let wire_aaaa = to_wire(&pkt_aaaa);
                 let meta_aaaa = scan_ttl_offsets(&wire_aaaa).unwrap();
                 total_wire_bytes += wire_aaaa.len();
-                total_wire_meta_bytes +=
-                    meta_aaaa.ttl_offsets.len() * std::mem::size_of::<usize>();
+                total_wire_meta_bytes += meta_aaaa.ttl_offsets.len() * std::mem::size_of::<usize>();
             }
         }
 
@@ -1300,15 +1425,31 @@ mod tests {
 
         // Also measure the struct size difference per entry
         let parsed_struct = std::mem::size_of::<DnsPacket>();
-        let wire_struct = std::mem::size_of::<Vec<u8>>() + std::mem::size_of::<Vec<usize>>() + std::mem::size_of::<usize>(); // wire + offsets + answer_count
+        let wire_struct = std::mem::size_of::<Vec<u8>>()
+            + std::mem::size_of::<Vec<usize>>()
+            + std::mem::size_of::<usize>(); // wire + offsets + answer_count
 
         println!();
-        println!("=== Cache Memory Footprint Baseline ({} entries) ===", entry_count);
+        println!(
+            "=== Cache Memory Footprint Baseline ({} entries) ===",
+            entry_count
+        );
         println!();
         println!("Variable data (heap, per-entry payload):");
-        println!("  Parsed (packet.heap_bytes):  {} bytes ({:.1}/entry)", parsed_data_bytes, parsed_data_bytes as f64 / entry_count as f64);
-        println!("  Wire (bytes + TTL offsets):   {} bytes ({:.1}/entry)", wire_total, wire_total as f64 / entry_count as f64);
-        println!("  Ratio:                        {:.1}x smaller with wire", parsed_data_bytes as f64 / wire_total as f64);
+        println!(
+            "  Parsed (packet.heap_bytes):  {} bytes ({:.1}/entry)",
+            parsed_data_bytes,
+            parsed_data_bytes as f64 / entry_count as f64
+        );
+        println!(
+            "  Wire (bytes + TTL offsets):   {} bytes ({:.1}/entry)",
+            wire_total,
+            wire_total as f64 / entry_count as f64
+        );
+        println!(
+            "  Ratio:                        {:.1}x smaller with wire",
+            parsed_data_bytes as f64 / wire_total as f64
+        );
         println!();
         println!("Struct overhead (stack, per entry):");
         println!("  DnsPacket:                   {} bytes", parsed_struct);
@@ -1319,7 +1460,10 @@ mod tests {
         let wire_total_per = wire_struct as f64 + wire_total as f64 / entry_count as f64;
         println!("  Parsed:  {:.0} bytes", parsed_total_per);
         println!("  Wire:    {:.0} bytes", wire_total_per);
-        println!("  Ratio:   {:.1}x smaller with wire", parsed_total_per / wire_total_per);
+        println!(
+            "  Ratio:   {:.1}x smaller with wire",
+            parsed_total_per / wire_total_per
+        );
         println!();
 
         // Assertions

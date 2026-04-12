@@ -16,9 +16,7 @@ use crate::blocklist::BlocklistStore;
 use crate::buffer::BytePacketBuffer;
 use crate::cache::{DnsCache, DnssecStatus};
 use crate::config::{UpstreamMode, ZoneMap};
-use crate::forward::{
-    forward_query_raw, forward_with_failover_raw, Upstream, UpstreamPool,
-};
+use crate::forward::{forward_query_raw, forward_with_failover_raw, Upstream, UpstreamPool};
 use crate::header::ResultCode;
 use crate::health::HealthMeta;
 use crate::lan::PeerStore;
@@ -182,9 +180,7 @@ pub async fn resolve_query(
                 // (e.g. Tailscale .ts.net, VPC private zones)
                 let upstream = Upstream::Udp(fwd_addr);
                 match forward_and_cache(raw_wire, &upstream, ctx, &qname, qtype).await {
-                    Ok(resp) => {
-                        (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate)
-                    }
+                    Ok(resp) => (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate),
                     Err(e) => {
                         error!(
                             "{} | {:?} {} | FORWARD ERROR | {}",
@@ -224,17 +220,35 @@ pub async fn resolve_query(
                 (resp, path, DnssecStatus::Indeterminate)
             } else {
                 let pool = ctx.upstream_pool.lock().unwrap().clone();
-                match forward_with_failover_raw(raw_wire, &pool, &ctx.srtt, ctx.timeout, ctx.hedge_delay).await {
+                match forward_with_failover_raw(
+                    raw_wire,
+                    &pool,
+                    &ctx.srtt,
+                    ctx.timeout,
+                    ctx.hedge_delay,
+                )
+                .await
+                {
                     Ok(resp_wire) => {
                         ctx.cache.write().unwrap().insert_wire(
-                            &qname, qtype, &resp_wire, DnssecStatus::Indeterminate,
+                            &qname,
+                            qtype,
+                            &resp_wire,
+                            DnssecStatus::Indeterminate,
                         );
                         let mut buf = BytePacketBuffer::from_bytes(&resp_wire);
                         match DnsPacket::from_buffer(&mut buf) {
                             Ok(resp) => (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate),
                             Err(e) => {
-                                error!("{} | {:?} {} | PARSE ERROR | {}", src_addr, qtype, qname, e);
-                                (DnsPacket::response_from(&query, ResultCode::SERVFAIL), QueryPath::UpstreamError, DnssecStatus::Indeterminate)
+                                error!(
+                                    "{} | {:?} {} | PARSE ERROR | {}",
+                                    src_addr, qtype, qname, e
+                                );
+                                (
+                                    DnsPacket::response_from(&query, ResultCode::SERVFAIL),
+                                    QueryPath::UpstreamError,
+                                    DnssecStatus::Indeterminate,
+                                )
                             }
                         }
                     }
