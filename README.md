@@ -124,7 +124,7 @@ From Machine B: `curl http://api.numa` → proxied to Machine A's port 8000. Ena
 
 ## Performance
 
-0.1ms cached queries — matches Unbound, 47× faster than NextDNS. Wire-level cache stores raw bytes with in-place TTL patching. Request hedging eliminates p99 spikes: cold recursive p99 538ms vs Unbound 748ms (−28%), σ 4× tighter. [Benchmarks →](benches/)
+0.1ms cached queries — matches Unbound and AdGuard Home. Wire-level cache stores raw bytes with in-place TTL patching. Request hedging eliminates p99 spikes: cold recursive p99 538ms vs Unbound 748ms (−28%), σ 4× tighter. [Benchmarks →](benches/)
 
 ## Learn More
 
