@@ -39,6 +39,7 @@ tower = { version = "0.5", features = ["util"] }
 http = "1"
 hickory-resolver = { version = "0.25", features = ["https-ring", "webpki-roots"] }
 hickory-proto = "0.25"
+x509-parser = "0.18"
 
 [[bench]]
 name = "hot_path"

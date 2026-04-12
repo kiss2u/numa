@@ -251,4 +251,72 @@ mod tests {
         let err: crate::Error = "rcgen failure".into();
         assert!(try_data_dir_advisory(&err, &PathBuf::from("/x")).is_none());
     }
+
+    #[test]
+    fn service_cert_contains_expected_sans() {
+        use x509_parser::prelude::GeneralName;
+
+        let dir = std::env::temp_dir().join(format!("numa-test-san-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (ca_der, issuer) = ensure_ca(&dir).unwrap();
+
+        let names = vec!["grafana".into(), "router".into()];
+        let (chain, _) = generate_service_cert(&ca_der, &issuer, "numa", &names).unwrap();
+        assert_eq!(chain.len(), 2, "chain should be [leaf, CA]");
+
+        let (_, cert) = x509_parser::parse_x509_certificate(chain[0].as_ref()).unwrap();
+        let san = cert
+            .tbs_certificate
+            .subject_alternative_name()
+            .unwrap()
+            .unwrap();
+
+        let dns: Vec<&str> = san
+            .value
+            .general_names
+            .iter()
+            .filter_map(|gn| match gn {
+                GeneralName::DNSName(s) => Some(*s),
+                _ => None,
+            })
+            .collect();
+
+        let ips: Vec<std::net::IpAddr> = san
+            .value
+            .general_names
+            .iter()
+            .filter_map(|gn| match gn {
+                GeneralName::IPAddress(b) => match b.len() {
+                    4 => Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                        b[0], b[1], b[2], b[3],
+                    ))),
+                    16 => {
+                        let a: [u8; 16] = (*b).try_into().unwrap();
+                        Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(a)))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+
+        // DNS SANs
+        assert!(dns.contains(&"*.numa"), "missing wildcard SAN");
+        assert!(dns.contains(&"grafana.numa"), "missing service SAN");
+        assert!(dns.contains(&"router.numa"), "missing service SAN");
+        assert!(dns.contains(&"localhost"), "missing localhost SAN");
+        assert!(dns.contains(&"numa"), "missing bare TLD SAN");
+
+        // IP SANs
+        assert!(
+            ips.contains(&std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            "missing 127.0.0.1 SAN"
+        );
+        assert!(
+            ips.contains(&std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
+            "missing ::1 SAN"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
