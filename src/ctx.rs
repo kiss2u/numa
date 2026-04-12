@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
@@ -35,6 +35,8 @@ pub struct ServerCtx {
     pub zone_map: ZoneMap,
     /// std::sync::RwLock (not tokio) — locks must never be held across .await points.
     pub cache: RwLock<DnsCache>,
+    /// Domains currently being refreshed in the background (dedup guard).
+    pub refreshing: Mutex<HashSet<(String, QueryType)>>,
     pub stats: Mutex<ServerStats>,
     pub overrides: RwLock<OverrideStore>,
     pub blocklist: RwLock<BlocklistStore>,
@@ -168,9 +170,15 @@ pub async fn resolve_query(
             let cached = ctx.cache.read().unwrap().lookup_with_status(&qname, qtype);
             if let Some((cached, cached_dnssec, stale)) = cached {
                 if stale {
-                    let ctx = Arc::clone(ctx);
-                    let qname = qname.clone();
-                    tokio::spawn(async move { warm_stale(&ctx, &qname, qtype).await });
+                    let key = (qname.clone(), qtype);
+                    let already = !ctx.refreshing.lock().unwrap().insert(key.clone());
+                    if !already {
+                        let ctx = Arc::clone(ctx);
+                        tokio::spawn(async move {
+                            warm_stale(&ctx, &key.0, key.1).await;
+                            ctx.refreshing.lock().unwrap().remove(&key);
+                        });
+                    }
                 }
                 let mut resp = cached;
                 resp.header.id = query.header.id;

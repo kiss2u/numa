@@ -285,6 +285,7 @@ async fn main() -> numa::Result<()> {
             config.cache.min_ttl,
             config.cache.max_ttl,
         )),
+        refreshing: Mutex::new(std::collections::HashSet::new()),
         stats: Mutex::new(ServerStats::new()),
         overrides: RwLock::new(OverrideStore::new()),
         blocklist: RwLock::new(blocklist),

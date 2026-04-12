@@ -357,6 +357,7 @@ mod tests {
                 m
             },
             cache: RwLock::new(crate::cache::DnsCache::new(100, 60, 86400)),
+            refreshing: Mutex::new(std::collections::HashSet::new()),
             stats: Mutex::new(crate::stats::ServerStats::new()),
             overrides: RwLock::new(crate::override_store::OverrideStore::new()),
             blocklist: RwLock::new(crate::blocklist::BlocklistStore::new()),
