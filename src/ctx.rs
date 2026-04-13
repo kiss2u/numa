@@ -1098,4 +1098,125 @@ mod tests {
         );
         assert_eq!(resp.header.rescode, ResultCode::NOERROR);
     }
+
+    #[tokio::test]
+    async fn pipeline_override_takes_precedence() {
+        let ctx = crate::testutil::test_ctx().await;
+        ctx.overrides
+            .write()
+            .unwrap()
+            .insert("override.test", "1.2.3.4", 60, None)
+            .unwrap();
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "override.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Overridden);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(resp.answers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pipeline_localhost_resolves_to_loopback() {
+        let ctx = Arc::new(crate::testutil::test_ctx().await);
+
+        let (resp, path) = resolve_in_test(&ctx, "localhost", QueryType::A).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::LOCALHOST),
+            other => panic!("expected A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_localhost_subdomain_resolves_to_loopback() {
+        let ctx = Arc::new(crate::testutil::test_ctx().await);
+
+        let (resp, path) = resolve_in_test(&ctx, "app.localhost", QueryType::A).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+    }
+
+    #[tokio::test]
+    async fn pipeline_local_zone_returns_configured_record() {
+        let mut ctx = crate::testutil::test_ctx().await;
+        let mut inner = HashMap::new();
+        inner.insert(
+            QueryType::A,
+            vec![DnsRecord::A {
+                domain: "myapp.test".to_string(),
+                addr: Ipv4Addr::new(10, 0, 0, 42),
+                ttl: 300,
+            }],
+        );
+        ctx.zone_map.insert("myapp.test".to_string(), inner);
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "myapp.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(10, 0, 0, 42)),
+            other => panic!("expected A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_tld_proxy_resolves_service() {
+        let ctx = crate::testutil::test_ctx().await;
+        ctx.services.lock().unwrap().insert("grafana", 3000);
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "grafana.numa", QueryType::A).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::LOCALHOST),
+            other => panic!("expected A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_blocklist_sinkhole() {
+        let ctx = crate::testutil::test_ctx().await;
+        let mut domains = std::collections::HashSet::new();
+        domains.insert("ads.tracker.test".to_string());
+        ctx.blocklist.write().unwrap().swap_domains(domains, vec![]);
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "ads.tracker.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Blocked);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::UNSPECIFIED),
+            other => panic!("expected sinkhole A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_cache_hit() {
+        let ctx = Arc::new(crate::testutil::test_ctx().await);
+
+        // Pre-populate cache with a response
+        let mut pkt = DnsPacket::new();
+        pkt.header.response = true;
+        pkt.header.rescode = ResultCode::NOERROR;
+        pkt.questions.push(crate::question::DnsQuestion {
+            name: "cached.test".to_string(),
+            qtype: QueryType::A,
+        });
+        pkt.answers.push(DnsRecord::A {
+            domain: "cached.test".to_string(),
+            addr: Ipv4Addr::new(5, 5, 5, 5),
+            ttl: 3600,
+        });
+        ctx.cache
+            .write()
+            .unwrap()
+            .insert("cached.test", QueryType::A, &pkt);
+
+        let (resp, path) = resolve_in_test(&ctx, "cached.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Cached);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+    }
 }
