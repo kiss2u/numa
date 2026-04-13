@@ -6,7 +6,7 @@ date: 2026-04-12
 
 If you're using reqwest for small HTTP/2 payloads, you probably have a tail latency problem you don't know about. Hyper's default flow control windows are 10,000× oversized for anything under 1 KB, and its dispatch channel adds periodic 40-140ms stalls that don't show up in median benchmarks.
 
-I hit this building [Numa](https://github.com/razvandimescu/numa), a DNS resolver that forwards queries over HTTPS. Median was 10ms, mean was 23ms — the tail was dragging everything.
+I hit this building Numa's DoH forwarding path. Median was 10ms, mean was 23ms — the tail was dragging everything.
 
 <div class="hero-metrics">
 <div class="metric-card">
