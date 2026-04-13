@@ -96,7 +96,8 @@ pub async fn resolve_query(
         None => return Err("empty question section".into()),
     };
 
-    // Pipeline: overrides -> .tld interception -> blocklist -> local zones -> cache -> upstream
+    // Pipeline: overrides -> .localhost -> local zones -> special-use (unless forwarded)
+    //        -> .tld proxy -> blocklist -> cache -> forwarding -> recursive/upstream
     // Each lock is scoped to avoid holding MutexGuard across await points.
     let (response, path, dnssec) = {
         let override_record = ctx.overrides.read().unwrap().lookup(&qname);
@@ -119,8 +120,11 @@ pub async fn resolve_query(
             let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
             resp.answers = records.clone();
             (resp, QueryPath::Local, DnssecStatus::Indeterminate)
-        } else if is_special_use_domain(&qname) {
-            // RFC 6761/8880: private PTR, DDR, NAT64 — answer locally
+        } else if is_special_use_domain(&qname)
+            && crate::system_dns::match_forwarding_rule(&qname, &ctx.forwarding_rules).is_none()
+        {
+            // RFC 6761/8880: private PTR, DDR, NAT64 — answer locally,
+            // unless an explicit forwarding rule covers this zone.
             let resp = special_use_response(&query, &qname, qtype);
             (resp, QueryPath::Local, DnssecStatus::Indeterminate)
         } else if !ctx.proxy_tld_suffix.is_empty()
@@ -655,6 +659,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::net::Ipv4Addr;
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use tokio::sync::broadcast;
 
@@ -1034,6 +1039,158 @@ mod tests {
             err.as_deref(),
             Some("connection refused by upstream"),
             "error message must be preserved for logging"
+        );
+    }
+
+    // ---- Full-pipeline resolve_query tests ----
+
+    async fn test_ctx() -> Arc<ServerCtx> {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        Arc::new(ServerCtx {
+            socket,
+            zone_map: HashMap::new(),
+            cache: RwLock::new(DnsCache::new(100, 60, 86400)),
+            refreshing: Mutex::new(HashSet::new()),
+            stats: Mutex::new(ServerStats::new()),
+            overrides: RwLock::new(OverrideStore::new()),
+            blocklist: RwLock::new(BlocklistStore::new()),
+            query_log: Mutex::new(QueryLog::new(100)),
+            services: Mutex::new(ServiceStore::new()),
+            lan_peers: Mutex::new(PeerStore::new(90)),
+            forwarding_rules: Vec::new(),
+            upstream_pool: Mutex::new(UpstreamPool::new(
+                vec![Upstream::Udp("127.0.0.1:53".parse().unwrap())],
+                vec![],
+            )),
+            upstream_auto: false,
+            upstream_port: 53,
+            lan_ip: Mutex::new(Ipv4Addr::LOCALHOST),
+            timeout: Duration::from_secs(3),
+            hedge_delay: Duration::ZERO,
+            proxy_tld: "numa".to_string(),
+            proxy_tld_suffix: ".numa".to_string(),
+            lan_enabled: false,
+            config_path: "/tmp/test-numa.toml".to_string(),
+            config_found: false,
+            config_dir: PathBuf::from("/tmp"),
+            data_dir: PathBuf::from("/tmp"),
+            tls_config: None,
+            upstream_mode: UpstreamMode::Forward,
+            root_hints: Vec::new(),
+            srtt: RwLock::new(SrttCache::new(true)),
+            inflight: Mutex::new(HashMap::new()),
+            dnssec_enabled: false,
+            dnssec_strict: false,
+            health_meta: HealthMeta::test_fixture(),
+            ca_pem: None,
+            mobile_enabled: false,
+            mobile_port: 8765,
+        })
+    }
+
+    /// Helper: send a query through the full resolve_query pipeline and return
+    /// the parsed response + query path.
+    async fn resolve_in_test(
+        ctx: &Arc<ServerCtx>,
+        domain: &str,
+        qtype: QueryType,
+    ) -> (DnsPacket, QueryPath) {
+        let query = DnsPacket::query(0xBEEF, domain, qtype);
+        let mut buf = BytePacketBuffer::new();
+        query.write(&mut buf).unwrap();
+        let raw = &buf.buf[..buf.pos];
+        let src: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+
+        let resp_buf = resolve_query(query, raw, src, ctx, Transport::Udp)
+            .await
+            .unwrap();
+
+        let log = ctx.query_log.lock().unwrap();
+        let entry = log.query(&crate::query_log::QueryLogFilter {
+            domain: None,
+            query_type: None,
+            path: None,
+            since: None,
+            limit: Some(1),
+        });
+        let path = entry.first().unwrap().path;
+        drop(log);
+
+        let mut resp_parse_buf = BytePacketBuffer::from_bytes(resp_buf.filled());
+        let resp = DnsPacket::from_buffer(&mut resp_parse_buf).unwrap();
+        (resp, path)
+    }
+
+    #[tokio::test]
+    async fn special_use_private_ptr_returns_nxdomain() {
+        let ctx = test_ctx().await;
+        let (resp, path) =
+            resolve_in_test(&ctx, "153.188.168.192.in-addr.arpa", QueryType::PTR).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NXDOMAIN);
+    }
+
+    async fn test_ctx_with_forwarding(rules: Vec<ForwardingRule>) -> Arc<ServerCtx> {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        Arc::new(ServerCtx {
+            socket,
+            zone_map: HashMap::new(),
+            cache: RwLock::new(DnsCache::new(100, 60, 86400)),
+            refreshing: Mutex::new(HashSet::new()),
+            stats: Mutex::new(ServerStats::new()),
+            overrides: RwLock::new(OverrideStore::new()),
+            blocklist: RwLock::new(BlocklistStore::new()),
+            query_log: Mutex::new(QueryLog::new(100)),
+            services: Mutex::new(ServiceStore::new()),
+            lan_peers: Mutex::new(PeerStore::new(90)),
+            forwarding_rules: rules,
+            upstream_pool: Mutex::new(UpstreamPool::new(
+                vec![Upstream::Udp("127.0.0.1:53".parse().unwrap())],
+                vec![],
+            )),
+            upstream_auto: false,
+            upstream_port: 53,
+            lan_ip: Mutex::new(Ipv4Addr::LOCALHOST),
+            timeout: Duration::from_millis(100),
+            hedge_delay: Duration::ZERO,
+            proxy_tld: "numa".to_string(),
+            proxy_tld_suffix: ".numa".to_string(),
+            lan_enabled: false,
+            config_path: "/tmp/test-numa.toml".to_string(),
+            config_found: false,
+            config_dir: PathBuf::from("/tmp"),
+            data_dir: PathBuf::from("/tmp"),
+            tls_config: None,
+            upstream_mode: UpstreamMode::Forward,
+            root_hints: Vec::new(),
+            srtt: RwLock::new(SrttCache::new(true)),
+            inflight: Mutex::new(HashMap::new()),
+            dnssec_enabled: false,
+            dnssec_strict: false,
+            health_meta: HealthMeta::test_fixture(),
+            ca_pem: None,
+            mobile_enabled: false,
+            mobile_port: 8765,
+        })
+    }
+
+    #[tokio::test]
+    async fn forwarding_rule_overrides_special_use_domain() {
+        let rules = vec![ForwardingRule::new(
+            "168.192.in-addr.arpa".to_string(),
+            "192.168.88.1:53".parse().unwrap(),
+        )];
+        let ctx = test_ctx_with_forwarding(rules).await;
+
+        let (_, path) = resolve_in_test(&ctx, "153.188.168.192.in-addr.arpa", QueryType::PTR).await;
+
+        // Should attempt forwarding, not return local NXDOMAIN.
+        // The forwarding will fail (no real upstream at 192.168.88.1), so we
+        // expect UpstreamError — but critically NOT QueryPath::Local.
+        assert_ne!(
+            path,
+            QueryPath::Local,
+            "forwarding rule must take precedence over special-use NXDOMAIN"
         );
     }
 }
