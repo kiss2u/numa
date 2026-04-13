@@ -211,7 +211,7 @@ async fn handle_dot_connection<S>(
         )
         .await
         {
-            Ok(resp_buffer) => {
+            Ok((resp_buffer, _)) => {
                 if write_framed(&mut stream, resp_buffer.filled())
                     .await
                     .is_err()
@@ -279,7 +279,7 @@ where
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::{Mutex, RwLock};
+    use std::sync::Mutex;
 
     use rcgen::{CertificateParams, DnType, KeyPair};
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
@@ -344,63 +344,29 @@ mod tests {
     async fn spawn_dot_server() -> (SocketAddr, CertificateDer<'static>) {
         let (server_tls, cert_der) = test_tls_configs();
 
-        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        // Bind an unresponsive upstream and leak it so it lives for the test duration.
-        let blackhole = Box::leak(Box::new(std::net::UdpSocket::bind("127.0.0.1:0").unwrap()));
-        let upstream_addr = blackhole.local_addr().unwrap();
-        let ctx = Arc::new(ServerCtx {
-            socket,
-            zone_map: {
-                let mut m = HashMap::new();
-                let mut inner = HashMap::new();
-                inner.insert(
-                    QueryType::A,
-                    vec![DnsRecord::A {
-                        domain: "dot-test.example".to_string(),
-                        addr: std::net::Ipv4Addr::new(10, 0, 0, 1),
-                        ttl: 300,
-                    }],
-                );
-                m.insert("dot-test.example".to_string(), inner);
-                m
-            },
-            cache: RwLock::new(crate::cache::DnsCache::new(100, 60, 86400)),
-            refreshing: Mutex::new(std::collections::HashSet::new()),
-            stats: Mutex::new(crate::stats::ServerStats::new()),
-            overrides: RwLock::new(crate::override_store::OverrideStore::new()),
-            blocklist: RwLock::new(crate::blocklist::BlocklistStore::new()),
-            query_log: Mutex::new(crate::query_log::QueryLog::new(100)),
-            services: Mutex::new(crate::service_store::ServiceStore::new()),
-            lan_peers: Mutex::new(crate::lan::PeerStore::new(90)),
-            forwarding_rules: Vec::new(),
-            upstream_pool: Mutex::new(crate::forward::UpstreamPool::new(
-                vec![crate::forward::Upstream::Udp(upstream_addr)],
-                vec![],
-            )),
-            upstream_auto: false,
-            upstream_port: 53,
-            lan_ip: Mutex::new(std::net::Ipv4Addr::LOCALHOST),
-            timeout: Duration::from_millis(200),
-            hedge_delay: Duration::ZERO,
-            proxy_tld: "numa".to_string(),
-            proxy_tld_suffix: ".numa".to_string(),
-            lan_enabled: false,
-            config_path: String::new(),
-            config_found: false,
-            config_dir: std::path::PathBuf::from("/tmp"),
-            data_dir: std::path::PathBuf::from("/tmp"),
-            tls_config: Some(arc_swap::ArcSwap::from(server_tls)),
-            upstream_mode: crate::config::UpstreamMode::Forward,
-            root_hints: Vec::new(),
-            srtt: RwLock::new(crate::srtt::SrttCache::new(true)),
-            inflight: Mutex::new(HashMap::new()),
-            dnssec_enabled: false,
-            dnssec_strict: false,
-            health_meta: crate::health::HealthMeta::test_fixture(),
-            ca_pem: None,
-            mobile_enabled: false,
-            mobile_port: 8765,
-        });
+        let upstream_addr = crate::testutil::blackhole_upstream();
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.zone_map = {
+            let mut m = HashMap::new();
+            let mut inner = HashMap::new();
+            inner.insert(
+                QueryType::A,
+                vec![DnsRecord::A {
+                    domain: "dot-test.example".to_string(),
+                    addr: std::net::Ipv4Addr::new(10, 0, 0, 1),
+                    ttl: 300,
+                }],
+            );
+            m.insert("dot-test.example".to_string(), inner);
+            m
+        };
+        ctx.upstream_pool = Mutex::new(crate::forward::UpstreamPool::new(
+            vec![crate::forward::Upstream::Udp(upstream_addr)],
+            vec![],
+        ));
+        ctx.tls_config = Some(arc_swap::ArcSwap::from(server_tls));
+        let ctx = Arc::new(ctx);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

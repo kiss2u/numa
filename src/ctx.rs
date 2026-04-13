@@ -88,7 +88,7 @@ pub async fn resolve_query(
     src_addr: SocketAddr,
     ctx: &Arc<ServerCtx>,
     transport: Transport,
-) -> crate::Result<BytePacketBuffer> {
+) -> crate::Result<(BytePacketBuffer, QueryPath)> {
     let start = Instant::now();
 
     let (qname, qtype) = match query.questions.first() {
@@ -96,7 +96,8 @@ pub async fn resolve_query(
         None => return Err("empty question section".into()),
     };
 
-    // Pipeline: overrides -> .tld interception -> blocklist -> local zones -> cache -> upstream
+    // Pipeline: overrides -> .localhost -> local zones -> special-use (unless forwarded)
+    //        -> .tld proxy -> blocklist -> cache -> forwarding -> recursive/upstream
     // Each lock is scoped to avoid holding MutexGuard across await points.
     let (response, path, dnssec) = {
         let override_record = ctx.overrides.read().unwrap().lookup(&qname);
@@ -119,8 +120,10 @@ pub async fn resolve_query(
             let mut resp = DnsPacket::response_from(&query, ResultCode::NOERROR);
             resp.answers = records.clone();
             (resp, QueryPath::Local, DnssecStatus::Indeterminate)
-        } else if is_special_use_domain(&qname) {
-            // RFC 6761/8880: private PTR, DDR, NAT64 — answer locally
+        } else if is_special_use_domain(&qname)
+            && crate::system_dns::match_forwarding_rule(&qname, &ctx.forwarding_rules).is_none()
+        {
+            // RFC 6761/8880: answer locally unless a forwarding rule covers this zone.
             let resp = special_use_response(&query, &qname, qtype);
             (resp, QueryPath::Local, DnssecStatus::Indeterminate)
         } else if !ctx.proxy_tld_suffix.is_empty()
@@ -373,7 +376,7 @@ pub async fn resolve_query(
         dnssec,
     });
 
-    Ok(resp_buffer)
+    Ok((resp_buffer, path))
 }
 
 fn cache_and_parse(
@@ -457,7 +460,7 @@ pub async fn handle_query(
         }
     };
     match resolve_query(query, &buffer.buf[..raw_len], src_addr, ctx, transport).await {
-        Ok(resp_buffer) => {
+        Ok((resp_buffer, _)) => {
             ctx.socket.send_to(resp_buffer.filled(), src_addr).await?;
         }
         Err(e) => {
@@ -1035,5 +1038,217 @@ mod tests {
             Some("connection refused by upstream"),
             "error message must be preserved for logging"
         );
+    }
+
+    // ---- Full-pipeline resolve_query tests ----
+
+    /// Send a query through the full resolve_query pipeline and return
+    /// the parsed response + query path.
+    async fn resolve_in_test(
+        ctx: &Arc<ServerCtx>,
+        domain: &str,
+        qtype: QueryType,
+    ) -> (DnsPacket, QueryPath) {
+        let query = DnsPacket::query(0xBEEF, domain, qtype);
+        let mut buf = BytePacketBuffer::new();
+        query.write(&mut buf).unwrap();
+        let raw = &buf.buf[..buf.pos];
+        let src: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+
+        let (resp_buf, path) = resolve_query(query, raw, src, ctx, Transport::Udp)
+            .await
+            .unwrap();
+
+        let mut resp_parse_buf = BytePacketBuffer::from_bytes(resp_buf.filled());
+        let resp = DnsPacket::from_buffer(&mut resp_parse_buf).unwrap();
+        (resp, path)
+    }
+
+    #[tokio::test]
+    async fn special_use_private_ptr_returns_nxdomain() {
+        let ctx = Arc::new(crate::testutil::test_ctx().await);
+        let (resp, path) =
+            resolve_in_test(&ctx, "153.188.168.192.in-addr.arpa", QueryType::PTR).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NXDOMAIN);
+    }
+
+    #[tokio::test]
+    async fn forwarding_rule_overrides_special_use_domain() {
+        let mut resp = DnsPacket::new();
+        resp.header.response = true;
+        resp.header.rescode = ResultCode::NOERROR;
+        let upstream_addr = crate::testutil::mock_upstream(resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "168.192.in-addr.arpa".to_string(),
+            upstream_addr,
+        )];
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) =
+            resolve_in_test(&ctx, "153.188.168.192.in-addr.arpa", QueryType::PTR).await;
+
+        assert_eq!(
+            path,
+            QueryPath::Forwarded,
+            "forwarding rule must take precedence over special-use NXDOMAIN"
+        );
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+    }
+
+    #[tokio::test]
+    async fn pipeline_override_takes_precedence() {
+        let ctx = crate::testutil::test_ctx().await;
+        ctx.overrides
+            .write()
+            .unwrap()
+            .insert("override.test", "1.2.3.4", 60, None)
+            .unwrap();
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "override.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Overridden);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(resp.answers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pipeline_localhost_resolves_to_loopback() {
+        let ctx = Arc::new(crate::testutil::test_ctx().await);
+
+        let (resp, path) = resolve_in_test(&ctx, "localhost", QueryType::A).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::LOCALHOST),
+            other => panic!("expected A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_localhost_subdomain_resolves_to_loopback() {
+        let ctx = Arc::new(crate::testutil::test_ctx().await);
+
+        let (resp, path) = resolve_in_test(&ctx, "app.localhost", QueryType::A).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::LOCALHOST),
+            other => panic!("expected A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_local_zone_returns_configured_record() {
+        let mut ctx = crate::testutil::test_ctx().await;
+        let mut inner = HashMap::new();
+        inner.insert(
+            QueryType::A,
+            vec![DnsRecord::A {
+                domain: "myapp.test".to_string(),
+                addr: Ipv4Addr::new(10, 0, 0, 42),
+                ttl: 300,
+            }],
+        );
+        ctx.zone_map.insert("myapp.test".to_string(), inner);
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "myapp.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(10, 0, 0, 42)),
+            other => panic!("expected A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_tld_proxy_resolves_service() {
+        let ctx = crate::testutil::test_ctx().await;
+        ctx.services.lock().unwrap().insert("grafana", 3000);
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "grafana.numa", QueryType::A).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::LOCALHOST),
+            other => panic!("expected A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_blocklist_sinkhole() {
+        let ctx = crate::testutil::test_ctx().await;
+        let mut domains = std::collections::HashSet::new();
+        domains.insert("ads.tracker.test".to_string());
+        ctx.blocklist.write().unwrap().swap_domains(domains, vec![]);
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "ads.tracker.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Blocked);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        match &resp.answers[0] {
+            DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::UNSPECIFIED),
+            other => panic!("expected sinkhole A record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_cache_hit() {
+        let ctx = Arc::new(crate::testutil::test_ctx().await);
+
+        // Pre-populate cache with a response
+        let mut pkt = DnsPacket::new();
+        pkt.header.response = true;
+        pkt.header.rescode = ResultCode::NOERROR;
+        pkt.questions.push(crate::question::DnsQuestion {
+            name: "cached.test".to_string(),
+            qtype: QueryType::A,
+        });
+        pkt.answers.push(DnsRecord::A {
+            domain: "cached.test".to_string(),
+            addr: Ipv4Addr::new(5, 5, 5, 5),
+            ttl: 3600,
+        });
+        ctx.cache
+            .write()
+            .unwrap()
+            .insert("cached.test", QueryType::A, &pkt);
+
+        let (resp, path) = resolve_in_test(&ctx, "cached.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Cached);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+    }
+
+    #[tokio::test]
+    async fn pipeline_forwarding_returns_upstream_answer() {
+        let mut upstream_resp = DnsPacket::new();
+        upstream_resp.header.response = true;
+        upstream_resp.header.rescode = ResultCode::NOERROR;
+        upstream_resp.answers.push(DnsRecord::A {
+            domain: "internal.corp".to_string(),
+            addr: Ipv4Addr::new(10, 1, 2, 3),
+            ttl: 600,
+        });
+        let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.forwarding_rules = vec![ForwardingRule::new("corp".to_string(), upstream_addr)];
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "internal.corp", QueryType::A).await;
+        assert_eq!(path, QueryPath::Forwarded);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(resp.answers.len(), 1);
+        match &resp.answers[0] {
+            DnsRecord::A { domain, addr, .. } => {
+                assert_eq!(domain, "internal.corp");
+                assert_eq!(*addr, Ipv4Addr::new(10, 1, 2, 3));
+            }
+            other => panic!("expected A record, got {:?}", other),
+        }
     }
 }

@@ -1020,53 +1020,10 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use http::Request;
-    use std::sync::{Mutex, RwLock};
     use tower::ServiceExt;
 
     async fn test_ctx() -> Arc<ServerCtx> {
-        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        Arc::new(ServerCtx {
-            socket,
-            zone_map: std::collections::HashMap::new(),
-            cache: RwLock::new(crate::cache::DnsCache::new(100, 60, 86400)),
-            refreshing: Mutex::new(std::collections::HashSet::new()),
-            stats: Mutex::new(crate::stats::ServerStats::new()),
-            overrides: RwLock::new(crate::override_store::OverrideStore::new()),
-            blocklist: RwLock::new(crate::blocklist::BlocklistStore::new()),
-            query_log: Mutex::new(crate::query_log::QueryLog::new(100)),
-            services: Mutex::new(crate::service_store::ServiceStore::new()),
-            lan_peers: Mutex::new(crate::lan::PeerStore::new(90)),
-            forwarding_rules: Vec::new(),
-            upstream_pool: Mutex::new(crate::forward::UpstreamPool::new(
-                vec![crate::forward::Upstream::Udp(
-                    "127.0.0.1:53".parse().unwrap(),
-                )],
-                vec![],
-            )),
-            upstream_auto: false,
-            upstream_port: 53,
-            lan_ip: Mutex::new(std::net::Ipv4Addr::LOCALHOST),
-            timeout: std::time::Duration::from_secs(3),
-            hedge_delay: std::time::Duration::ZERO,
-            proxy_tld: "numa".to_string(),
-            proxy_tld_suffix: ".numa".to_string(),
-            lan_enabled: false,
-            config_path: "/tmp/test-numa.toml".to_string(),
-            config_found: false,
-            config_dir: std::path::PathBuf::from("/tmp"),
-            data_dir: std::path::PathBuf::from("/tmp"),
-            tls_config: None,
-            upstream_mode: crate::config::UpstreamMode::Forward,
-            root_hints: Vec::new(),
-            srtt: RwLock::new(crate::srtt::SrttCache::new(true)),
-            inflight: Mutex::new(std::collections::HashMap::new()),
-            dnssec_enabled: false,
-            dnssec_strict: false,
-            health_meta: crate::health::HealthMeta::test_fixture(),
-            ca_pem: None,
-            mobile_enabled: false,
-            mobile_port: 8765,
-        })
+        Arc::new(crate::testutil::test_ctx().await)
     }
 
     #[tokio::test]
