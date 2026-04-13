@@ -113,7 +113,7 @@ async fn resolve_doh(
     let questions = query.questions.clone();
 
     match resolve_query(query, dns_bytes, src, ctx, Transport::Doh).await {
-        Ok(resp_buffer) => {
+        Ok((resp_buffer, _)) => {
             let min_ttl = extract_min_ttl(resp_buffer.filled());
             dns_response(resp_buffer.filled(), min_ttl)
         }

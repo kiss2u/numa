@@ -211,7 +211,7 @@ async fn handle_dot_connection<S>(
         )
         .await
         {
-            Ok(resp_buffer) => {
+            Ok((resp_buffer, _)) => {
                 if write_framed(&mut stream, resp_buffer.filled())
                     .await
                     .is_err()
