@@ -1045,47 +1045,7 @@ mod tests {
     // ---- Full-pipeline resolve_query tests ----
 
     async fn test_ctx() -> Arc<ServerCtx> {
-        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        Arc::new(ServerCtx {
-            socket,
-            zone_map: HashMap::new(),
-            cache: RwLock::new(DnsCache::new(100, 60, 86400)),
-            refreshing: Mutex::new(HashSet::new()),
-            stats: Mutex::new(ServerStats::new()),
-            overrides: RwLock::new(OverrideStore::new()),
-            blocklist: RwLock::new(BlocklistStore::new()),
-            query_log: Mutex::new(QueryLog::new(100)),
-            services: Mutex::new(ServiceStore::new()),
-            lan_peers: Mutex::new(PeerStore::new(90)),
-            forwarding_rules: Vec::new(),
-            upstream_pool: Mutex::new(UpstreamPool::new(
-                vec![Upstream::Udp("127.0.0.1:53".parse().unwrap())],
-                vec![],
-            )),
-            upstream_auto: false,
-            upstream_port: 53,
-            lan_ip: Mutex::new(Ipv4Addr::LOCALHOST),
-            timeout: Duration::from_secs(3),
-            hedge_delay: Duration::ZERO,
-            proxy_tld: "numa".to_string(),
-            proxy_tld_suffix: ".numa".to_string(),
-            lan_enabled: false,
-            config_path: "/tmp/test-numa.toml".to_string(),
-            config_found: false,
-            config_dir: PathBuf::from("/tmp"),
-            data_dir: PathBuf::from("/tmp"),
-            tls_config: None,
-            upstream_mode: UpstreamMode::Forward,
-            root_hints: Vec::new(),
-            srtt: RwLock::new(SrttCache::new(true)),
-            inflight: Mutex::new(HashMap::new()),
-            dnssec_enabled: false,
-            dnssec_strict: false,
-            health_meta: HealthMeta::test_fixture(),
-            ca_pem: None,
-            mobile_enabled: false,
-            mobile_port: 8765,
-        })
+        test_ctx_with_forwarding(Vec::new()).await
     }
 
     /// Helper: send a query through the full resolve_query pipeline and return
