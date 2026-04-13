@@ -28,6 +28,9 @@ pub mod system_dns;
 pub mod tls;
 pub mod wire;
 
+#[cfg(test)]
+pub(crate) mod testutil;
+
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
 

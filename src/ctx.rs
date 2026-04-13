@@ -659,7 +659,6 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::net::Ipv4Addr;
-    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use tokio::sync::broadcast;
 
@@ -1044,10 +1043,6 @@ mod tests {
 
     // ---- Full-pipeline resolve_query tests ----
 
-    async fn test_ctx() -> Arc<ServerCtx> {
-        test_ctx_with_forwarding(Vec::new()).await
-    }
-
     /// Send a query through the full resolve_query pipeline and return
     /// the parsed response + query path.
     async fn resolve_in_test(
@@ -1072,73 +1067,11 @@ mod tests {
 
     #[tokio::test]
     async fn special_use_private_ptr_returns_nxdomain() {
-        let ctx = test_ctx().await;
+        let ctx = Arc::new(crate::testutil::test_ctx().await);
         let (resp, path) =
             resolve_in_test(&ctx, "153.188.168.192.in-addr.arpa", QueryType::PTR).await;
         assert_eq!(path, QueryPath::Local);
         assert_eq!(resp.header.rescode, ResultCode::NXDOMAIN);
-    }
-
-    async fn test_ctx_with_forwarding(rules: Vec<ForwardingRule>) -> Arc<ServerCtx> {
-        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        Arc::new(ServerCtx {
-            socket,
-            zone_map: HashMap::new(),
-            cache: RwLock::new(DnsCache::new(100, 60, 86400)),
-            refreshing: Mutex::new(HashSet::new()),
-            stats: Mutex::new(ServerStats::new()),
-            overrides: RwLock::new(OverrideStore::new()),
-            blocklist: RwLock::new(BlocklistStore::new()),
-            query_log: Mutex::new(QueryLog::new(100)),
-            services: Mutex::new(ServiceStore::new()),
-            lan_peers: Mutex::new(PeerStore::new(90)),
-            forwarding_rules: rules,
-            upstream_pool: Mutex::new(UpstreamPool::new(
-                vec![Upstream::Udp("127.0.0.1:53".parse().unwrap())],
-                vec![],
-            )),
-            upstream_auto: false,
-            upstream_port: 53,
-            lan_ip: Mutex::new(Ipv4Addr::LOCALHOST),
-            timeout: Duration::from_millis(100),
-            hedge_delay: Duration::ZERO,
-            proxy_tld: "numa".to_string(),
-            proxy_tld_suffix: ".numa".to_string(),
-            lan_enabled: false,
-            config_path: "/tmp/test-numa.toml".to_string(),
-            config_found: false,
-            config_dir: PathBuf::from("/tmp"),
-            data_dir: PathBuf::from("/tmp"),
-            tls_config: None,
-            upstream_mode: UpstreamMode::Forward,
-            root_hints: Vec::new(),
-            srtt: RwLock::new(SrttCache::new(true)),
-            inflight: Mutex::new(HashMap::new()),
-            dnssec_enabled: false,
-            dnssec_strict: false,
-            health_meta: HealthMeta::test_fixture(),
-            ca_pem: None,
-            mobile_enabled: false,
-            mobile_port: 8765,
-        })
-    }
-
-    /// Spawn a UDP socket that replies to the first DNS query with the given
-    /// response packet (patching the query ID). Returns the socket address.
-    async fn mock_upstream(response: DnsPacket) -> SocketAddr {
-        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let addr = sock.local_addr().unwrap();
-        tokio::spawn(async move {
-            let mut buf = [0u8; 512];
-            let (_, src) = sock.recv_from(&mut buf).await.unwrap();
-            let query_id = u16::from_be_bytes([buf[0], buf[1]]);
-            let mut resp = response;
-            resp.header.id = query_id;
-            let mut out = BytePacketBuffer::new();
-            resp.write(&mut out).unwrap();
-            sock.send_to(out.filled(), src).await.unwrap();
-        });
-        addr
     }
 
     #[tokio::test]
@@ -1146,13 +1079,14 @@ mod tests {
         let mut resp = DnsPacket::new();
         resp.header.response = true;
         resp.header.rescode = ResultCode::NOERROR;
-        let upstream_addr = mock_upstream(resp).await;
+        let upstream_addr = crate::testutil::mock_upstream(resp).await;
 
-        let rules = vec![ForwardingRule::new(
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.forwarding_rules = vec![ForwardingRule::new(
             "168.192.in-addr.arpa".to_string(),
             upstream_addr,
         )];
-        let ctx = test_ctx_with_forwarding(rules).await;
+        let ctx = Arc::new(ctx);
 
         let (resp, path) =
             resolve_in_test(&ctx, "153.188.168.192.in-addr.arpa", QueryType::PTR).await;
