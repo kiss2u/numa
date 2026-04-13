@@ -3,8 +3,22 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'site/**'
+      - 'blog/**'
+      - 'drafts/**'
+      - '*.md'
+      - 'scripts/serve-site.sh'
+      - 'scripts/generate-blog-index.sh'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - 'site/**'
+      - 'blog/**'
+      - 'drafts/**'
+      - '*.md'
+      - 'scripts/serve-site.sh'
+      - 'scripts/generate-blog-index.sh'
 
 env:
   CARGO_TERM_COLOR: always

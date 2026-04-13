@@ -23,6 +23,13 @@ name: Publish - Arch Linux AUR Package
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'site/**'
+      - 'blog/**'
+      - 'drafts/**'
+      - '*.md'
+      - 'scripts/serve-site.sh'
+      - 'scripts/generate-blog-index.sh'
   workflow_dispatch:
 
 permissions:
