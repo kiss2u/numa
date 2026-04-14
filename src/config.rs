@@ -46,12 +46,12 @@ pub struct ForwardingRuleConfig {
 
 impl ForwardingRuleConfig {
     fn to_runtime_rules(&self) -> Result<Vec<crate::system_dns::ForwardingRule>> {
-        let addr = crate::forward::parse_upstream_addr(&self.upstream, 53)
+        let upstream = crate::forward::parse_upstream(&self.upstream, 53)
             .map_err(|e| format!("forwarding rule for upstream '{}': {}", self.upstream, e))?;
         Ok(self
             .suffix
             .iter()
-            .map(|s| crate::system_dns::ForwardingRule::new(s.clone(), addr))
+            .map(|s| crate::system_dns::ForwardingRule::new(s.clone(), upstream.clone()))
             .collect())
     }
 }
@@ -710,6 +710,10 @@ mod tests {
         };
         let runtime = rule.to_runtime_rules().unwrap();
         assert_eq!(runtime.len(), 1);
+        assert!(matches!(
+            runtime[0].upstream,
+            crate::forward::Upstream::Udp(_)
+        ));
         assert_eq!(runtime[0].upstream.to_string(), "100.90.1.63:5361");
         assert_eq!(runtime[0].suffix, "home.local");
     }
@@ -734,6 +738,38 @@ mod tests {
     }
 
     #[test]
+    fn forwarding_upstream_accepts_dot_scheme() {
+        let rule = ForwardingRuleConfig {
+            suffix: vec!["google.com".to_string()],
+            upstream: "tls://9.9.9.9#dns.quad9.net".to_string(),
+        };
+        let runtime = rule
+            .to_runtime_rules()
+            .expect("tls:// upstream should parse");
+        assert_eq!(runtime.len(), 1);
+        assert_eq!(
+            runtime[0].upstream.to_string(),
+            "tls://9.9.9.9:853#dns.quad9.net"
+        );
+    }
+
+    #[test]
+    fn forwarding_upstream_accepts_doh_scheme() {
+        let rule = ForwardingRuleConfig {
+            suffix: vec!["goog".to_string()],
+            upstream: "https://dns.quad9.net/dns-query".to_string(),
+        };
+        let runtime = rule
+            .to_runtime_rules()
+            .expect("https:// upstream should parse");
+        assert_eq!(runtime.len(), 1);
+        assert_eq!(
+            runtime[0].upstream.to_string(),
+            "https://dns.quad9.net/dns-query"
+        );
+    }
+
+    #[test]
     fn forwarding_config_rules_take_precedence_over_discovered() {
         let config_rules = vec![ForwardingRuleConfig {
             suffix: vec!["home.local".to_string()],
@@ -741,7 +777,7 @@ mod tests {
         }];
         let discovered = vec![crate::system_dns::ForwardingRule::new(
             "home.local".to_string(),
-            "192.168.1.1:53".parse().unwrap(),
+            crate::forward::Upstream::Udp("192.168.1.1:53".parse().unwrap()),
         )];
         let merged = merge_forwarding_rules(&config_rules, discovered).unwrap();
         let picked = crate::system_dns::match_forwarding_rule("host.home.local", &merged)
@@ -757,7 +793,7 @@ mod tests {
         }];
         let discovered = vec![crate::system_dns::ForwardingRule::new(
             "corp.example".to_string(),
-            "192.168.1.1:53".parse().unwrap(),
+            crate::forward::Upstream::Udp("192.168.1.1:53".parse().unwrap()),
         )];
         let merged = merge_forwarding_rules(&config_rules, discovered).unwrap();
         assert_eq!(merged.len(), 2);

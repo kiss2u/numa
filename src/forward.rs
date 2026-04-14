@@ -36,6 +36,12 @@ impl PartialEq for Upstream {
     }
 }
 
+impl fmt::Debug for Upstream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
 impl fmt::Display for Upstream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -49,7 +55,10 @@ impl fmt::Display for Upstream {
     }
 }
 
-pub fn parse_upstream_addr(s: &str, default_port: u16) -> std::result::Result<SocketAddr, String> {
+pub(crate) fn parse_upstream_addr(
+    s: &str,
+    default_port: u16,
+) -> std::result::Result<SocketAddr, String> {
     // Try full socket addr first: "1.2.3.4:5353" or "[::1]:5353"
     if let Ok(addr) = s.parse::<SocketAddr>() {
         return Ok(addr);
