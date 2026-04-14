@@ -58,6 +58,14 @@ api_port = 5380
 # [[forwarding]]
 # suffix = ["home.local", "home.arpa"]             # multiple suffixes → same upstream
 # upstream = "10.0.0.1"                            # port 53 default
+#
+# [[forwarding]]                                    # DoT upstream: tls://IP[:port]#hostname
+# suffix = ["google.com", "goog"]                   # hostname is the TLS SNI / cert name
+# upstream = "tls://9.9.9.9#dns.quad9.net"          # port 853 default
+#
+# [[forwarding]]                                    # DoH upstream: full https:// URL
+# suffix = "example.corp"
+# upstream = "https://dns.quad9.net/dns-query"
 
 # [blocking]
 # enabled = true               # set to false to disable ad blocking

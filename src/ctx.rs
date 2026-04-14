@@ -190,13 +190,12 @@ pub async fn resolve_query(
                     resp.header.authed_data = true;
                 }
                 (resp, QueryPath::Cached, cached_dnssec)
-            } else if let Some(fwd_addr) =
+            } else if let Some(upstream) =
                 crate::system_dns::match_forwarding_rule(&qname, &ctx.forwarding_rules)
             {
                 // Conditional forwarding takes priority over recursive mode
                 // (e.g. Tailscale .ts.net, VPC private zones)
-                let upstream = Upstream::Udp(fwd_addr);
-                match forward_and_cache(raw_wire, &upstream, ctx, &qname, qtype).await {
+                match forward_and_cache(raw_wire, upstream, ctx, &qname, qtype).await {
                     Ok(resp) => (resp, QueryPath::Forwarded, DnssecStatus::Indeterminate),
                     Err(e) => {
                         error!(
@@ -1083,7 +1082,7 @@ mod tests {
         let mut ctx = crate::testutil::test_ctx().await;
         ctx.forwarding_rules = vec![ForwardingRule::new(
             "168.192.in-addr.arpa".to_string(),
-            upstream_addr,
+            Upstream::Udp(upstream_addr),
         )];
         let ctx = Arc::new(ctx);
 
@@ -1236,7 +1235,10 @@ mod tests {
         let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
 
         let mut ctx = crate::testutil::test_ctx().await;
-        ctx.forwarding_rules = vec![ForwardingRule::new("corp".to_string(), upstream_addr)];
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "corp".to_string(),
+            Upstream::Udp(upstream_addr),
+        )];
         let ctx = Arc::new(ctx);
 
         let (resp, path) = resolve_in_test(&ctx, "internal.corp", QueryType::A).await;

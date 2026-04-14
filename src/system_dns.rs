@@ -2,6 +2,8 @@ use std::net::SocketAddr;
 
 use log::info;
 
+use crate::forward::Upstream;
+
 fn print_recursive_hint() {
     let is_recursive = crate::config::load_config("numa.toml")
         .map(|c| c.config.upstream.mode == crate::config::UpstreamMode::Recursive)
@@ -22,11 +24,11 @@ fn is_loopback_or_stub(addr: &str) -> bool {
 pub struct ForwardingRule {
     pub suffix: String,
     dot_suffix: String, // pre-computed ".suffix" for zero-alloc matching
-    pub upstream: SocketAddr,
+    pub upstream: Upstream,
 }
 
 impl ForwardingRule {
-    pub fn new(suffix: String, upstream: SocketAddr) -> Self {
+    pub fn new(suffix: String, upstream: Upstream) -> Self {
         let dot_suffix = format!(".{}", suffix);
         Self {
             suffix,
@@ -233,7 +235,7 @@ fn discover_macos() -> SystemDnsInfo {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn make_rule(domain: &str, nameserver: &str) -> Option<ForwardingRule> {
     let addr = crate::forward::parse_upstream_addr(nameserver, 53).ok()?;
-    Some(ForwardingRule::new(domain.to_string(), addr))
+    Some(ForwardingRule::new(domain.to_string(), Upstream::Udp(addr)))
 }
 
 #[cfg(target_os = "linux")]
@@ -822,10 +824,13 @@ fn uninstall_windows() -> Result<(), String> {
 /// Find the upstream for a domain by checking forwarding rules.
 /// Returns None if no rule matches (use default upstream).
 /// Zero-allocation on the hot path — dot_suffix is pre-computed.
-pub fn match_forwarding_rule(domain: &str, rules: &[ForwardingRule]) -> Option<SocketAddr> {
+pub fn match_forwarding_rule<'a>(
+    domain: &str,
+    rules: &'a [ForwardingRule],
+) -> Option<&'a Upstream> {
     for rule in rules {
         if domain == rule.suffix || domain.ends_with(&rule.dot_suffix) {
-            return Some(rule.upstream);
+            return Some(&rule.upstream);
         }
     }
     None
