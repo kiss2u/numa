@@ -1256,9 +1256,6 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_default_pool_reports_upstream_path() {
-        // No forwarding rule matches — query falls through to the default
-        // [upstream] pool. Path must be reported as Upstream (not Forwarded)
-        // so operators can distinguish [[forwarding]] hits from pool traffic.
         let mut upstream_resp = DnsPacket::new();
         upstream_resp.header.response = true;
         upstream_resp.header.rescode = ResultCode::NOERROR;
@@ -1269,11 +1266,11 @@ mod tests {
         });
         let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
 
-        let mut ctx = crate::testutil::test_ctx().await;
-        ctx.upstream_pool = std::sync::Mutex::new(crate::forward::UpstreamPool::new(
-            vec![Upstream::Udp(upstream_addr)],
-            vec![],
-        ));
+        let ctx = crate::testutil::test_ctx().await;
+        ctx.upstream_pool
+            .lock()
+            .unwrap()
+            .set_primary(vec![Upstream::Udp(upstream_addr)]);
         let ctx = Arc::new(ctx);
 
         let (resp, path) = resolve_in_test(&ctx, "example.com", QueryType::A).await;
