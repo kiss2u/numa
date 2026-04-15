@@ -32,6 +32,14 @@ async fn main() -> numa::Result<()> {
     // Handle CLI subcommands
     let arg1 = std::env::args().nth(1).unwrap_or_default();
     match arg1.as_str() {
+        #[cfg(windows)]
+        "--service" => {
+            // Entry point used by Windows SCM (`sc create … binPath="numa.exe --service"`).
+            // Hands control to the service dispatcher and blocks until Stop.
+            numa::windows_service::run_as_service()
+                .map_err(|e| format!("windows service dispatcher failed: {}", e))?;
+            return Ok(());
+        }
         "install" => {
             eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — installing\n");
             return install_service().map_err(|e| e.into());

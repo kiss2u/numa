@@ -28,6 +28,9 @@ pub mod system_dns;
 pub mod tls;
 pub mod wire;
 
+#[cfg(windows)]
+pub mod windows_service;
+
 #[cfg(test)]
 pub(crate) mod testutil;
 
