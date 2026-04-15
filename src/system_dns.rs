@@ -697,7 +697,23 @@ fn install_windows() -> Result<(), String> {
     }
 
     let needs_reboot = disable_dnscache()?;
-    register_autostart();
+
+    // Copy the binary to a stable path under ProgramData and register it
+    // as a real Windows service (SCM-managed, boot-time, auto-restart).
+    let service_exe = install_service_binary()?;
+    register_service_scm(&service_exe)?;
+
+    // If no reboot is pending (Dnscache wasn't running, port 53 free),
+    // start the service immediately. Otherwise it'll launch on next boot.
+    if !needs_reboot {
+        match start_service_scm() {
+            Ok(_) => eprintln!("  Service started."),
+            Err(e) => eprintln!(
+                "  warning: service registered but could not start now: {}",
+                e
+            ),
+        }
+    }
 
     eprintln!();
     if !has_useful_existing {
@@ -707,51 +723,160 @@ fn install_windows() -> Result<(), String> {
     if needs_reboot {
         eprintln!("  *** Reboot required. Numa will start automatically. ***\n");
     } else {
-        eprintln!("  Numa will start automatically on next boot.\n");
+        eprintln!("  Numa is running.\n");
     }
     print_recursive_hint();
     Ok(())
 }
 
-/// Register numa to auto-start on boot via registry Run key.
 #[cfg(windows)]
-fn register_autostart() {
-    let exe = std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "numa".into());
-    let _ = std::process::Command::new("reg")
-        .args([
-            "add",
-            "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
-            "/v",
-            "Numa",
-            "/t",
-            "REG_SZ",
-            "/d",
-            &exe,
-            "/f",
-        ])
-        .status();
-    eprintln!("  Registered auto-start on boot.");
+const WINDOWS_SERVICE_NAME: &str = "Numa";
+
+/// Stable install location for the service binary. SCM keeps a handle to
+/// this path; the user's Downloads folder (where `current_exe()` points at
+/// install time) is not durable.
+#[cfg(windows)]
+fn windows_service_exe_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("PROGRAMDATA").unwrap_or_else(|_| "C:\\ProgramData".into()),
+    )
+    .join("numa")
+    .join("bin")
+    .join("numa.exe")
 }
 
-/// Remove numa auto-start registry key.
+/// Copy the currently-running binary to the service install location. SCM
+/// keeps a handle to this path, so it must be stable across user sessions.
 #[cfg(windows)]
-fn remove_autostart() {
-    let _ = std::process::Command::new("reg")
+fn install_service_binary() -> Result<std::path::PathBuf, String> {
+    let src = std::env::current_exe().map_err(|e| format!("current_exe(): {}", e))?;
+    let dst = windows_service_exe_path();
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
+    }
+    // Copy only if source and destination differ; running the binary from
+    // its install location is a supported (re-install) case.
+    if src != dst {
+        std::fs::copy(&src, &dst).map_err(|e| {
+            format!(
+                "failed to copy {} -> {}: {}",
+                src.display(),
+                dst.display(),
+                e
+            )
+        })?;
+    }
+    Ok(dst)
+}
+
+/// Remove the service binary on uninstall. Ignore failures — the service
+/// is already deleted; a leftover file in ProgramData is not a hard error.
+#[cfg(windows)]
+fn remove_service_binary() {
+    let _ = std::fs::remove_file(windows_service_exe_path());
+}
+
+/// Register numa with the Service Control Manager, boot-time auto-start,
+/// LocalSystem context, with a failure policy of restart-after-5s.
+#[cfg(windows)]
+fn register_service_scm(exe: &std::path::Path) -> Result<(), String> {
+    let bin_path = format!("\"{}\" --service", exe.display());
+
+    // sc.exe uses a leading space as its `name= value` delimiter; the space
+    // after `=` is mandatory.
+    let create = std::process::Command::new("sc")
         .args([
-            "delete",
-            "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
-            "/v",
-            "Numa",
-            "/f",
+            "create",
+            WINDOWS_SERVICE_NAME,
+            "binPath=",
+            &bin_path,
+            "DisplayName=",
+            "Numa DNS",
+            "start=",
+            "auto",
+            "obj=",
+            "LocalSystem",
         ])
+        .output()
+        .map_err(|e| format!("failed to run sc create: {}", e))?;
+    if !create.status.success() {
+        let out = String::from_utf8_lossy(&create.stdout);
+        // "service already exists" is 1073 — treat as idempotent success.
+        if !out.contains("1073") {
+            return Err(format!("sc create failed: {}", out.trim()));
+        }
+    }
+
+    let _ = std::process::Command::new("sc")
+        .args([
+            "description",
+            WINDOWS_SERVICE_NAME,
+            "Self-sovereign DNS resolver (ad blocking, DoH/DoT, local zones).",
+        ])
+        .status();
+
+    // Restart on crash: 5s, 5s, 10s; reset failure counter after 60s.
+    let _ = std::process::Command::new("sc")
+        .args([
+            "failure",
+            WINDOWS_SERVICE_NAME,
+            "reset=",
+            "60",
+            "actions=",
+            "restart/5000/restart/5000/restart/10000",
+        ])
+        .status();
+
+    eprintln!(
+        "  Registered service '{}' (boot-time).",
+        WINDOWS_SERVICE_NAME
+    );
+    Ok(())
+}
+
+/// Start the service. Safe to call on a freshly-registered service — SCM
+/// will fail with 1056 ("already running") or 1058 ("disabled") and we
+/// return the underlying error string rather than masking it.
+#[cfg(windows)]
+fn start_service_scm() -> Result<(), String> {
+    let out = std::process::Command::new("sc")
+        .args(["start", WINDOWS_SERVICE_NAME])
+        .output()
+        .map_err(|e| format!("failed to run sc start: {}", e))?;
+    if !out.status.success() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        if text.contains("1056") {
+            return Ok(()); // already running
+        }
+        return Err(format!("sc start failed: {}", text.trim()));
+    }
+    Ok(())
+}
+
+/// Stop the service. Returns Ok if already stopped — idempotent.
+#[cfg(windows)]
+fn stop_service_scm() {
+    let _ = std::process::Command::new("sc")
+        .args(["stop", WINDOWS_SERVICE_NAME])
+        .status();
+}
+
+/// Remove the service from SCM. Safe if already absent.
+#[cfg(windows)]
+fn delete_service_scm() {
+    let _ = std::process::Command::new("sc")
+        .args(["delete", WINDOWS_SERVICE_NAME])
         .status();
 }
 
 #[cfg(windows)]
 fn uninstall_windows() -> Result<(), String> {
-    remove_autostart();
+    // Stop + remove the service before touching DNS, so port 53 is released
+    // cleanly and the failure-restart policy doesn't resurrect it.
+    stop_service_scm();
+    delete_service_scm();
+    remove_service_binary();
     let path = windows_backup_path();
     let json = std::fs::read_to_string(&path)
         .map_err(|e| format!("no backup found at {}: {}", path.display(), e))?;

@@ -20,6 +20,7 @@ pub mod query_log;
 pub mod question;
 pub mod record;
 pub mod recursive;
+pub mod serve;
 pub mod service_store;
 pub mod setup_phone;
 pub mod srtt;

@@ -57,12 +57,50 @@ fn run_service() -> windows_service::Result<()> {
         process_id: None,
     })?;
 
-    // TODO(windows-service): call numa's async serve loop here once main.rs's
-    // server body is extracted into `numa::serve(config_path)`. For now the
-    // service registers, reports Running, and blocks until SCM sends Stop —
-    // useful for verifying the SCM plumbing end to end with `sc start Numa`
-    // and `sc stop Numa`.
-    let _ = shutdown_rx.recv();
+    // Spin up a multi-threaded tokio runtime and run the server on it. A
+    // dedicated thread runs the runtime so this function can return cleanly
+    // once the SCM tells us to stop — we can't block the dispatcher thread
+    // forever without preventing graceful shutdown.
+    let config_path = service_config_path();
+    let (runtime_stop_tx, runtime_stop_rx) = mpsc::channel::<()>();
+
+    let server_thread = std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                log::error!("failed to build tokio runtime: {}", e);
+                let _ = runtime_stop_tx.send(());
+                return;
+            }
+        };
+
+        // block_on returns when serve::run's UDP loop errors out OR when the
+        // runtime is dropped from another thread. Either signals exit.
+        if let Err(e) = runtime.block_on(crate::serve::run(config_path)) {
+            log::error!("numa serve exited with error: {}", e);
+        }
+        let _ = runtime_stop_tx.send(());
+    });
+
+    // Wait for either SCM stop or server termination.
+    loop {
+        if shutdown_rx.try_recv().is_ok() {
+            break;
+        }
+        if runtime_stop_rx.try_recv().is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // The server's tokio runtime runs detached inside server_thread. Abandon
+    // it — the process is about to report Stopped and the SCM will terminate
+    // us if we linger. Future work: plumb a cancellation signal into
+    // serve::run() for a clean teardown of listeners and in-flight queries.
+    drop(server_thread);
 
     status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
@@ -82,4 +120,13 @@ fn run_service() -> windows_service::Result<()> {
 /// will hang here waiting for an SCM that isn't talking to them.
 pub fn run_as_service() -> windows_service::Result<()> {
     service_dispatcher::start(SERVICE_NAME, ffi_service_main)
+}
+
+/// Path to the config file used when running under SCM. SCM launches the
+/// service with SYSTEM's working directory (usually `C:\Windows\System32`),
+/// so a relative `numa.toml` lookup won't find anything meaningful — use an
+/// absolute path under `%PROGRAMDATA%` instead.
+fn service_config_path() -> String {
+    let base = std::env::var("PROGRAMDATA").unwrap_or_else(|_| "C:\\ProgramData".into());
+    format!("{}\\numa\\numa.toml", base)
 }
