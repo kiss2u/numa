@@ -211,7 +211,7 @@ fn discover_macos() -> SystemDnsInfo {
     }
 
     // Sort longest suffix first for most-specific matching
-    rules.sort_by(|a, b| b.suffix.len().cmp(&a.suffix.len()));
+    rules.sort_by_key(|r| std::cmp::Reverse(r.suffix.len()));
 
     for rule in &rules {
         info!(
