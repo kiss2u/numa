@@ -93,13 +93,16 @@ jobs:
           sudo ./target/release/numa uninstall
           sleep 1
           ! curl -sf http://127.0.0.1:5380/health 2>/dev/null
-          # Wait for systemd-resolved to restore DNS so the runner can
-          # phone home to GitHub after the job completes.
-          sleep 3
-          dig @127.0.0.1 github.com +short +timeout=5 || dig github.com +short +timeout=5 || true
       - name: cleanup
         if: always()
-        run: sudo ./target/release/numa uninstall 2>/dev/null || true
+        run: |
+          sudo ./target/release/numa uninstall 2>/dev/null || true
+          # Wait for systemd-resolved to fully restore DNS so post-job
+          # steps (rust-cache upload, log shipping) can reach GitHub.
+          for i in $(seq 1 30); do
+            if getent hosts github.com >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
 
   integration-macos:
     needs: [check-macos]
