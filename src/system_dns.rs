@@ -698,6 +698,13 @@ fn install_windows() -> Result<(), String> {
 
     let needs_reboot = disable_dnscache()?;
 
+    // On re-install, stop the running service first so the binary can be
+    // overwritten (SCM holds a handle to the exe while it's running).
+    let reinstall = is_service_registered();
+    if reinstall {
+        stop_service_scm();
+    }
+
     // Copy the binary to a stable path under ProgramData and register it
     // as a real Windows service (SCM-managed, boot-time, auto-restart).
     let service_exe = install_service_binary()?;
@@ -862,6 +869,41 @@ fn delete_service_scm() {
     if let Err(e) = run_sc(&["delete", crate::windows_service::SERVICE_NAME]) {
         log::warn!("sc delete failed: {}", e);
     }
+}
+
+/// Check whether the service is registered with SCM (regardless of state).
+#[cfg(windows)]
+fn is_service_registered() -> bool {
+    run_sc(&["query", crate::windows_service::SERVICE_NAME])
+        .map(|o| {
+            // sc query exits 0 if the service exists (running or stopped).
+            // Error 1060 = "service does not exist".
+            if o.status.success() {
+                return true;
+            }
+            let text = String::from_utf8_lossy(&o.stdout);
+            !text.contains("1060")
+        })
+        .unwrap_or(false)
+}
+
+/// Print service state from SCM.
+#[cfg(windows)]
+fn service_status_windows() -> Result<(), String> {
+    let out = run_sc(&["query", crate::windows_service::SERVICE_NAME])?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if text.contains("1060") {
+        eprintln!("  Service is not installed.\n");
+        return Ok(());
+    }
+    // Parse STATE line, e.g. "STATE  : 4  RUNNING"
+    let state = text
+        .lines()
+        .find(|l| l.contains("STATE"))
+        .map(|l| l.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    eprintln!("  {}\n", state);
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -1167,6 +1209,62 @@ pub fn install_service() -> Result<(), String> {
     result
 }
 
+/// Start the service. If already installed, just starts it via the platform
+/// service manager. If not installed, falls through to a full install.
+pub fn start_service() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        install_service()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        install_service()
+    }
+    #[cfg(windows)]
+    {
+        if is_service_registered() {
+            start_service_scm()?;
+            eprintln!("  Service started.\n");
+            Ok(())
+        } else {
+            install_service()
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        Err("service start not supported on this OS".to_string())
+    }
+}
+
+/// Stop the service without uninstalling it.
+pub fn stop_service() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        uninstall_service()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        uninstall_service()
+    }
+    #[cfg(windows)]
+    {
+        let out = run_sc(&["stop", crate::windows_service::SERVICE_NAME])?;
+        if !out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            // 1062 = not started, 1060 = does not exist
+            if !text.contains("1062") && !text.contains("1060") {
+                return Err(format!("sc stop failed: {}", text.trim()));
+            }
+        }
+        eprintln!("  Service stopped.\n");
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        Err("service stop not supported on this OS".to_string())
+    }
+}
+
 /// Uninstall the Numa system service.
 pub fn uninstall_service() -> Result<(), String> {
     let _ = untrust_ca();
@@ -1236,7 +1334,14 @@ pub fn restart_service() -> Result<(), String> {
         eprintln!("  Service restarted → {}\n", version);
         Ok(())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    {
+        stop_service_scm();
+        start_service_scm()?;
+        eprintln!("  Service restarted.\n");
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         Err("service restart not supported on this OS".to_string())
     }
@@ -1252,7 +1357,11 @@ pub fn service_status() -> Result<(), String> {
     {
         service_status_linux()
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    {
+        service_status_windows()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         Err("service status not supported on this OS".to_string())
     }

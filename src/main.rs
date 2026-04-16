@@ -1,4 +1,7 @@
-use numa::system_dns::{install_service, restart_service, service_status, uninstall_service};
+use numa::system_dns::{
+    install_service, restart_service, service_status, start_service, stop_service,
+    uninstall_service,
+};
 
 fn main() -> numa::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -28,8 +31,8 @@ fn main() -> numa::Result<()> {
             let sub = std::env::args().nth(2).unwrap_or_default();
             eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — service management\n");
             return match sub.as_str() {
-                "start" => install_service().map_err(|e| e.into()),
-                "stop" => uninstall_service().map_err(|e| e.into()),
+                "start" => start_service().map_err(|e| e.into()),
+                "stop" => stop_service().map_err(|e| e.into()),
                 "restart" => restart_service().map_err(|e| e.into()),
                 "status" => service_status().map_err(|e| e.into()),
                 _ => {
