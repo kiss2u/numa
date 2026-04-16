@@ -912,16 +912,19 @@ fn delete_service_scm() {
 #[cfg(windows)]
 fn is_service_registered() -> bool {
     run_sc(&["query", crate::windows_service::SERVICE_NAME])
-        .map(|o| {
-            // sc query exits 0 if the service exists (running or stopped).
-            // Error 1060 = "service does not exist".
-            if o.status.success() {
-                return true;
-            }
-            let text = String::from_utf8_lossy(&o.stdout);
-            !text.contains("1060")
-        })
+        .map(|o| parse_sc_registered(o.status.success(), &String::from_utf8_lossy(&o.stdout)))
         .unwrap_or(false)
+}
+
+/// Parse `sc query` output to determine if a service is registered.
+/// Extracted for testability — the actual `sc` call is in `is_service_registered`.
+#[cfg(any(windows, test))]
+fn parse_sc_registered(exit_success: bool, stdout: &str) -> bool {
+    if exit_success {
+        return true;
+    }
+    // Error 1060 = "The specified service does not exist as an installed service."
+    !stdout.contains("1060")
 }
 
 /// Print service state from SCM.
@@ -929,18 +932,23 @@ fn is_service_registered() -> bool {
 fn service_status_windows() -> Result<(), String> {
     let out = run_sc(&["query", crate::windows_service::SERVICE_NAME])?;
     let text = String::from_utf8_lossy(&out.stdout);
-    if text.contains("1060") {
-        eprintln!("  Service is not installed.\n");
-        return Ok(());
+    let display = parse_sc_state(&text);
+    eprintln!("  {}\n", display);
+    Ok(())
+}
+
+/// Parse the STATE line from `sc query` output. Returns a human-readable
+/// string like "STATE : 4 RUNNING" or "Service is not installed."
+#[cfg(any(windows, test))]
+fn parse_sc_state(sc_output: &str) -> String {
+    if sc_output.contains("1060") {
+        return "Service is not installed.".to_string();
     }
-    // Parse STATE line, e.g. "STATE  : 4  RUNNING"
-    let state = text
+    sc_output
         .lines()
         .find(|l| l.contains("STATE"))
         .map(|l| l.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    eprintln!("  {}\n", state);
-    Ok(())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 #[cfg(windows)]
@@ -2131,5 +2139,58 @@ Wireless LAN adapter Wi-Fi:
     fn try_port53_advisory_skips_malformed_bind_addr() {
         let err = std::io::Error::from(std::io::ErrorKind::AddrInUse);
         assert!(try_port53_advisory("not-an-address", &err).is_none());
+    }
+
+    #[test]
+    fn sc_query_running_service_is_registered() {
+        assert!(parse_sc_registered(true, ""));
+    }
+
+    #[test]
+    fn sc_query_stopped_service_is_registered() {
+        let output = "SERVICE_NAME: Numa\n        TYPE: 10  WIN32_OWN\n        STATE: 1  STOPPED\n";
+        assert!(parse_sc_registered(true, output));
+    }
+
+    #[test]
+    fn sc_query_missing_service_not_registered() {
+        let output = "[SC] EnumQueryServicesStatus:OpenService FAILED 1060:\n\nThe specified service does not exist as an installed service.\n";
+        assert!(!parse_sc_registered(false, output));
+    }
+
+    #[test]
+    fn sc_query_other_error_assumes_registered() {
+        // Permission denied or other errors — don't assume unregistered.
+        let output = "[SC] OpenService FAILED 5:\n\nAccess is denied.\n";
+        assert!(parse_sc_registered(false, output));
+    }
+
+    #[test]
+    fn parse_sc_state_running() {
+        let output = "SERVICE_NAME: Numa\n        TYPE               : 10  WIN32_OWN_PROCESS\n        STATE              : 4  RUNNING\n        WIN32_EXIT_CODE    : 0\n";
+        assert!(parse_sc_state(output).contains("RUNNING"));
+    }
+
+    #[test]
+    fn parse_sc_state_stopped() {
+        let output = "SERVICE_NAME: Numa\n        TYPE               : 10  WIN32_OWN_PROCESS\n        STATE              : 1  STOPPED\n";
+        assert!(parse_sc_state(output).contains("STOPPED"));
+    }
+
+    #[test]
+    fn parse_sc_state_not_installed() {
+        let output = "[SC] EnumQueryServicesStatus:OpenService FAILED 1060:\n\n";
+        assert_eq!(parse_sc_state(output), "Service is not installed.");
+    }
+
+    #[test]
+    fn parse_sc_state_empty_output() {
+        assert_eq!(parse_sc_state(""), "unknown");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_config_dir_equals_data_dir() {
+        assert_eq!(crate::config_dir(), crate::data_dir());
     }
 }
