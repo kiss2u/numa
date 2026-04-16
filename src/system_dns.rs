@@ -679,14 +679,14 @@ fn install_windows() -> Result<(), String> {
         std::fs::write(&path, json).map_err(|e| format!("failed to write backup: {}", e))?;
     }
 
-    let needs_reboot = disable_dnscache()?;
-
     // On re-install, stop the running service first so the binary can be
-    // overwritten (SCM holds a handle to the exe while it's running).
-    let reinstall = is_service_registered();
-    if reinstall {
+    // overwritten and port 53 is released for the Dnscache probe.
+    if is_service_registered() {
+        eprintln!("  Stopping existing service...");
         stop_service_scm();
     }
+
+    let needs_reboot = disable_dnscache()?;
 
     // Copy the binary to a stable path under ProgramData and register it
     // as a real Windows service (SCM-managed, boot-time, auto-restart).
@@ -880,14 +880,24 @@ fn start_service_scm() -> Result<(), String> {
     Ok(())
 }
 
-/// Stop the service. Idempotent — already-stopped or missing service logs
-/// a warning but doesn't error, since both callers (install re-run,
-/// uninstall) want best-effort cleanup rather than hard failure.
+/// Stop the service and wait for it to fully exit. Idempotent —
+/// already-stopped or missing service is not an error.
 #[cfg(windows)]
 fn stop_service_scm() {
-    if let Err(e) = run_sc(&["stop", crate::windows_service::SERVICE_NAME]) {
-        log::warn!("sc stop failed: {}", e);
+    let name = crate::windows_service::SERVICE_NAME;
+    let _ = run_sc(&["stop", name]);
+    // Wait up to 10s for the service to reach STOPPED state so the
+    // binary file handle is released before we try to overwrite it.
+    for _ in 0..20 {
+        if let Ok(out) = run_sc(&["query", name]) {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if text.contains("STOPPED") || text.contains("1060") {
+                return;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
+    eprintln!("  warning: service did not stop within 10s");
 }
 
 /// Remove the service from SCM. Idempotent — see `stop_service_scm`.
