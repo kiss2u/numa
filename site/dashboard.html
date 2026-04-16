@@ -1153,13 +1153,10 @@ async function refresh() {
       const isWin = stats.data_dir && stats.data_dir.includes(':\\');
       const isMac = stats.data_dir && stats.data_dir.includes('/usr/local/');
       const logsEl = document.getElementById('footerLogs');
-      if (isWin) {
-        document.getElementById('footerLogsWrap').style.display = 'none';
-      } else {
-        logsEl.textContent = isMac
-          ? '/usr/local/var/log/numa.log'
-          : 'journalctl -u numa -f';
-      }
+      logsEl.textContent = isWin
+        ? stats.data_dir + '\\numa.log'
+        : isMac ? '/usr/local/var/log/numa.log'
+        : 'journalctl -u numa -f';
     }
 
     // LAN status indicator
@@ -1523,7 +1520,7 @@ setInterval(refresh, 2000);
 <div style="text-align:center;padding:0.8rem 0.8rem 0.4rem;font-family:var(--font-mono);font-size:0.68rem;color:var(--text-dim);line-height:1.8;">
   Config: <span id="footerConfig" style="user-select:all;color:var(--emerald);"></span>
   · Data: <span id="footerData" style="user-select:all;color:var(--emerald);"></span>
-  <span id="footerLogsWrap">· Logs: <span id="footerLogs" style="user-select:all;color:var(--emerald);"></span></span>
+  · Logs: <span id="footerLogs" style="user-select:all;color:var(--emerald);"></span>
   <br>
   Upstream: <span id="footerUpstream" style="user-select:all;color:var(--emerald);"></span>
   · DNSSEC: <span id="footerDnssec" style="color:var(--text-dim);">—</span>

@@ -4,21 +4,32 @@ use numa::system_dns::{
 };
 
 fn main() -> numa::Result<()> {
+    // Handle CLI subcommands
+    let arg1 = std::env::args().nth(1).unwrap_or_default();
+
+    #[cfg(windows)]
+    if arg1 == "--service" {
+        // Running under SCM — stderr goes nowhere. Redirect logs to a file.
+        let log_path = numa::data_dir().join("numa.log");
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .expect("failed to open log file");
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+            .format_timestamp_millis()
+            .target(env_logger::Target::Pipe(Box::new(log_file)))
+            .init();
+        numa::windows_service::run_as_service()
+            .map_err(|e| format!("windows service dispatcher failed: {}", e))?;
+        return Ok(());
+    }
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
 
-    // Handle CLI subcommands
-    let arg1 = std::env::args().nth(1).unwrap_or_default();
     match arg1.as_str() {
-        #[cfg(windows)]
-        "--service" => {
-            // Entry point used by Windows SCM (`sc create … binPath="numa.exe --service"`).
-            // Blocks until SCM sends Stop; never returns normally.
-            numa::windows_service::run_as_service()
-                .map_err(|e| format!("windows service dispatcher failed: {}", e))?;
-            return Ok(());
-        }
         "install" => {
             eprintln!("\x1b[1;38;2;192;98;58mNuma\x1b[0m — installing\n");
             return install_service().map_err(|e| e.into());
