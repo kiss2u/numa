@@ -20,6 +20,7 @@ pub mod query_log;
 pub mod question;
 pub mod record;
 pub mod recursive;
+pub mod serve;
 pub mod service_store;
 pub mod setup_phone;
 pub mod srtt;
@@ -27,6 +28,9 @@ pub mod stats;
 pub mod system_dns;
 pub mod tls;
 pub mod wire;
+
+#[cfg(windows)]
+pub mod windows_service;
 
 #[cfg(test)]
 pub(crate) mod testutil;
@@ -97,14 +101,11 @@ where
 /// Linux root daemon: /var/lib/numa (FHS) — falls back to /usr/local/var/numa
 ///                    if a pre-v0.10.1 install already lives there.
 /// macOS root daemon: /usr/local/var/numa (Homebrew prefix)
-/// Windows: %APPDATA%\numa
+/// Windows: %PROGRAMDATA%\numa (same as data_dir — no per-user config on Windows)
 pub fn config_dir() -> std::path::PathBuf {
     #[cfg(windows)]
     {
-        std::path::PathBuf::from(
-            std::env::var("APPDATA").unwrap_or_else(|_| "C:\\ProgramData".into()),
-        )
-        .join("numa")
+        data_dir()
     }
     #[cfg(not(windows))]
     {

@@ -1150,9 +1150,12 @@ async function refresh() {
     document.getElementById('footerSrtt').textContent = stats.srtt ? 'on' : 'off';
     document.getElementById('footerSrtt').style.color = stats.srtt ? 'var(--emerald)' : 'var(--text-dim)';
     if (!document.getElementById('footerLogs').textContent) {
+      const isWin = stats.data_dir && stats.data_dir.includes(':\\');
       const isMac = stats.data_dir && stats.data_dir.includes('/usr/local/');
-      document.getElementById('footerLogs').textContent = isMac
-        ? '/usr/local/var/log/numa.log'
+      const logsEl = document.getElementById('footerLogs');
+      logsEl.textContent = isWin
+        ? stats.data_dir + '\\numa.log'
+        : isMac ? '/usr/local/var/log/numa.log'
         : 'journalctl -u numa -f';
     }
 

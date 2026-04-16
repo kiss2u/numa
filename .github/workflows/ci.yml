@@ -56,6 +56,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: build
@@ -69,3 +71,62 @@ jobs:
         with:
           name: numa-windows-x86_64
           path: target/debug/numa.exe
+
+  integration-linux:
+    needs: [check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --release
+      - name: install / verify / re-install / uninstall
+        run: |
+          sudo ./target/release/numa install
+          sleep 2
+          curl -sf http://127.0.0.1:5380/health
+          dig @127.0.0.1 example.com +short +timeout=5 | grep -q '.'
+          sudo ./target/release/numa install
+          sleep 2
+          curl -sf http://127.0.0.1:5380/health
+          sudo ./target/release/numa uninstall
+          sleep 1
+          ! curl -sf http://127.0.0.1:5380/health 2>/dev/null
+      - name: cleanup
+        if: always()
+        run: |
+          sudo ./target/release/numa uninstall 2>/dev/null || true
+          # systemd-resolved has a ~40s DNS reconfiguration stall after
+          # restart (systemd issue #22521) that breaks the runner agent's
+          # connection to GitHub. Bridge it by replacing the stub-resolv
+          # symlink with a direct upstream — DNS works instantly and the
+          # runner can phone home for post-job steps.
+          sudo rm -f /etc/resolv.conf
+          echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf > /dev/null
+          getent hosts github.com >/dev/null
+
+  integration-macos:
+    needs: [check-macos]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --release
+      - name: install / verify / re-install / uninstall
+        run: |
+          sudo ./target/release/numa install
+          sleep 2
+          curl -sf http://127.0.0.1:5380/health
+          dig @127.0.0.1 example.com +short +timeout=5 | grep -q '.'
+          sudo ./target/release/numa install
+          sleep 2
+          curl -sf http://127.0.0.1:5380/health
+          sudo ./target/release/numa uninstall
+          sleep 1
+          ! curl -sf http://127.0.0.1:5380/health 2>/dev/null
+      - name: cleanup
+        if: always()
+        run: sudo ./target/release/numa uninstall 2>/dev/null || true

@@ -211,7 +211,7 @@ fn discover_macos() -> SystemDnsInfo {
     }
 
     // Sort longest suffix first for most-specific matching
-    rules.sort_by(|a, b| b.suffix.len().cmp(&a.suffix.len()));
+    rules.sort_by_key(|r| std::cmp::Reverse(r.suffix.len()));
 
     for rule in &rules {
         info!(
@@ -572,7 +572,7 @@ fn windows_backup_path() -> std::path::PathBuf {
 
 #[cfg(windows)]
 fn disable_dnscache() -> Result<bool, String> {
-    // Check if Dnscache is running (it holds port 53 at kernel level)
+    // Check if Dnscache is running (it can hold port 53)
     let output = std::process::Command::new("sc")
         .args(["query", "Dnscache"])
         .output()
@@ -603,8 +603,16 @@ fn disable_dnscache() -> Result<bool, String> {
         return Err("failed to disable Dnscache via registry (run as Administrator?)".into());
     }
 
-    eprintln!("  Dnscache disabled. A reboot is required to free port 53.");
-    Ok(true)
+    // Dnscache is disabled for next boot. Check whether port 53 is
+    // actually blocked right now — on many Windows configurations
+    // Dnscache doesn't bind port 53 even while running.
+    let port_blocked = std::net::UdpSocket::bind("127.0.0.1:53").is_err();
+    if port_blocked {
+        eprintln!("  Dnscache disabled. A reboot is required to free port 53.");
+    } else {
+        eprintln!("  Dnscache disabled. Port 53 is free.");
+    }
+    Ok(port_blocked)
 }
 
 #[cfg(windows)]
@@ -671,6 +679,83 @@ fn install_windows() -> Result<(), String> {
         std::fs::write(&path, json).map_err(|e| format!("failed to write backup: {}", e))?;
     }
 
+    // On re-install, stop the running service first so the binary can be
+    // overwritten and port 53 is released for the Dnscache probe.
+    if is_service_registered() {
+        eprintln!("  Stopping existing service...");
+        stop_service_scm();
+    }
+
+    let needs_reboot = disable_dnscache()?;
+
+    // Copy the binary to a stable path under ProgramData and register it
+    // as a real Windows service (SCM-managed, boot-time, auto-restart).
+    let service_exe = install_service_binary()?;
+    register_service_scm(&service_exe)?;
+
+    if needs_reboot {
+        // Dnscache still holds port 53 until reboot. Do NOT redirect DNS
+        // yet — nothing is listening on 127.0.0.1:53, so redirecting now
+        // would kill DNS. The service will call redirect_dns_to_localhost()
+        // on its first startup after reboot.
+    } else {
+        redirect_dns_with_interfaces(&interfaces)?;
+
+        match start_service_scm() {
+            Ok(_) => eprintln!("  Service started."),
+            Err(e) => eprintln!(
+                "  warning: service registered but could not start now: {}",
+                e
+            ),
+        }
+    }
+
+    eprintln!();
+    if !has_useful_existing {
+        eprintln!("  Original DNS saved to {}", path.display());
+    }
+    eprintln!("  Run 'numa uninstall' to restore.\n");
+    if needs_reboot {
+        eprintln!("  *** Reboot required. Numa will start automatically. ***\n");
+    } else {
+        eprintln!("  Numa is running.\n");
+    }
+    print_recursive_hint();
+    Ok(())
+}
+
+/// Stable install location for the service binary. SCM keeps a handle to
+/// this path; the user's Downloads folder (where `current_exe()` points at
+/// install time) is not durable.
+#[cfg(windows)]
+fn windows_service_exe_path() -> std::path::PathBuf {
+    crate::data_dir().join("bin").join("numa.exe")
+}
+
+/// Run `sc.exe` with the given args and return its merged stdout/stderr on
+/// failure. `sc` emits errors on stdout (not stderr) on Windows, so the
+/// caller reads stdout to format a useful error.
+#[cfg(windows)]
+fn run_sc(args: &[&str]) -> Result<std::process::Output, String> {
+    let out = std::process::Command::new("sc")
+        .args(args)
+        .output()
+        .map_err(|e| format!("failed to run sc {}: {}", args.first().unwrap_or(&""), e))?;
+    Ok(out)
+}
+
+/// Point all active network interfaces at 127.0.0.1 so Numa handles DNS.
+/// Called from the service on first boot after a reboot that freed Dnscache.
+#[cfg(windows)]
+pub fn redirect_dns_to_localhost() -> Result<(), String> {
+    let interfaces = get_windows_interfaces()?;
+    redirect_dns_with_interfaces(&interfaces)
+}
+
+#[cfg(windows)]
+fn redirect_dns_with_interfaces(
+    interfaces: &std::collections::HashMap<String, WindowsInterfaceDns>,
+) -> Result<(), String> {
     for name in interfaces.keys() {
         let status = std::process::Command::new("netsh")
             .args([
@@ -695,63 +780,184 @@ fn install_windows() -> Result<(), String> {
             );
         }
     }
-
-    let needs_reboot = disable_dnscache()?;
-    register_autostart();
-
-    eprintln!();
-    if !has_useful_existing {
-        eprintln!("  Original DNS saved to {}", path.display());
-    }
-    eprintln!("  Run 'numa uninstall' to restore.\n");
-    if needs_reboot {
-        eprintln!("  *** Reboot required. Numa will start automatically. ***\n");
-    } else {
-        eprintln!("  Numa will start automatically on next boot.\n");
-    }
-    print_recursive_hint();
     Ok(())
 }
 
-/// Register numa to auto-start on boot via registry Run key.
+/// Copy the currently-running binary to the service install location. SCM
+/// keeps a handle to this path, so it must be stable across user sessions.
 #[cfg(windows)]
-fn register_autostart() {
-    let exe = std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "numa".into());
-    let _ = std::process::Command::new("reg")
-        .args([
-            "add",
-            "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
-            "/v",
-            "Numa",
-            "/t",
-            "REG_SZ",
-            "/d",
-            &exe,
-            "/f",
-        ])
-        .status();
-    eprintln!("  Registered auto-start on boot.");
+fn install_service_binary() -> Result<std::path::PathBuf, String> {
+    let src = std::env::current_exe().map_err(|e| format!("current_exe(): {}", e))?;
+    let dst = windows_service_exe_path();
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
+    }
+    // Copy only if source and destination differ; running the binary from
+    // its install location is a supported (re-install) case.
+    if src != dst {
+        std::fs::copy(&src, &dst).map_err(|e| {
+            format!(
+                "failed to copy {} -> {}: {}",
+                src.display(),
+                dst.display(),
+                e
+            )
+        })?;
+    }
+    Ok(dst)
 }
 
-/// Remove numa auto-start registry key.
+/// Remove the service binary on uninstall. Ignore failures — the service
+/// is already deleted; a leftover file in ProgramData is not a hard error.
 #[cfg(windows)]
-fn remove_autostart() {
-    let _ = std::process::Command::new("reg")
-        .args([
-            "delete",
-            "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
-            "/v",
-            "Numa",
-            "/f",
-        ])
-        .status();
+fn remove_service_binary() {
+    let _ = std::fs::remove_file(windows_service_exe_path());
+}
+
+/// Register numa with the Service Control Manager, boot-time auto-start,
+/// LocalSystem context, with a failure policy of restart-after-5s.
+#[cfg(windows)]
+fn register_service_scm(exe: &std::path::Path) -> Result<(), String> {
+    let bin_path = format!("\"{}\" --service", exe.display());
+    let name = crate::windows_service::SERVICE_NAME;
+
+    // sc.exe uses a leading space as its `name= value` delimiter; the space
+    // after `=` is mandatory.
+    let create = run_sc(&[
+        "create",
+        name,
+        "binPath=",
+        &bin_path,
+        "DisplayName=",
+        "Numa DNS",
+        "start=",
+        "auto",
+        "obj=",
+        "LocalSystem",
+    ])?;
+    if !create.status.success() {
+        let out = String::from_utf8_lossy(&create.stdout);
+        // "service already exists" is 1073 — treat as idempotent success.
+        if !out.contains("1073") {
+            return Err(format!("sc create failed: {}", out.trim()));
+        }
+    }
+
+    let _ = run_sc(&[
+        "description",
+        name,
+        "Self-sovereign DNS resolver (ad blocking, DoH/DoT, local zones).",
+    ]);
+
+    // Restart on crash: 5s, 5s, 10s; reset failure counter after 60s.
+    let _ = run_sc(&[
+        "failure",
+        name,
+        "reset=",
+        "60",
+        "actions=",
+        "restart/5000/restart/5000/restart/10000",
+    ]);
+
+    eprintln!("  Registered service '{}' (boot-time).", name);
+    Ok(())
+}
+
+/// Start the service. Safe to call on a freshly-registered service — SCM
+/// will fail with 1056 ("already running") or 1058 ("disabled") and we
+/// return the underlying error string rather than masking it.
+#[cfg(windows)]
+fn start_service_scm() -> Result<(), String> {
+    let out = run_sc(&["start", crate::windows_service::SERVICE_NAME])?;
+    if !out.status.success() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        if text.contains("1056") {
+            return Ok(()); // already running
+        }
+        return Err(format!("sc start failed: {}", text.trim()));
+    }
+    Ok(())
+}
+
+/// Stop the service and wait for it to fully exit. Idempotent —
+/// already-stopped or missing service is not an error.
+#[cfg(windows)]
+fn stop_service_scm() {
+    let name = crate::windows_service::SERVICE_NAME;
+    let _ = run_sc(&["stop", name]);
+    // Wait up to 10s for the service to reach STOPPED state so the
+    // binary file handle is released before we try to overwrite it.
+    for _ in 0..20 {
+        if let Ok(out) = run_sc(&["query", name]) {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if text.contains("STOPPED") || text.contains("1060") {
+                return;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    eprintln!("  warning: service did not stop within 10s");
+}
+
+/// Remove the service from SCM. Idempotent — see `stop_service_scm`.
+#[cfg(windows)]
+fn delete_service_scm() {
+    if let Err(e) = run_sc(&["delete", crate::windows_service::SERVICE_NAME]) {
+        log::warn!("sc delete failed: {}", e);
+    }
+}
+
+/// Check whether the service is registered with SCM (regardless of state).
+#[cfg(windows)]
+fn is_service_registered() -> bool {
+    run_sc(&["query", crate::windows_service::SERVICE_NAME])
+        .map(|o| parse_sc_registered(o.status.success(), &String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or(false)
+}
+
+/// Parse `sc query` output to determine if a service is registered.
+/// Extracted for testability — the actual `sc` call is in `is_service_registered`.
+#[cfg(any(windows, test))]
+fn parse_sc_registered(exit_success: bool, stdout: &str) -> bool {
+    if exit_success {
+        return true;
+    }
+    // Error 1060 = "The specified service does not exist as an installed service."
+    !stdout.contains("1060")
+}
+
+/// Print service state from SCM.
+#[cfg(windows)]
+fn service_status_windows() -> Result<(), String> {
+    let out = run_sc(&["query", crate::windows_service::SERVICE_NAME])?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let display = parse_sc_state(&text);
+    eprintln!("  {}\n", display);
+    Ok(())
+}
+
+/// Parse the STATE line from `sc query` output. Returns a human-readable
+/// string like "STATE : 4 RUNNING" or "Service is not installed."
+#[cfg(any(windows, test))]
+fn parse_sc_state(sc_output: &str) -> String {
+    if sc_output.contains("1060") {
+        return "Service is not installed.".to_string();
+    }
+    sc_output
+        .lines()
+        .find(|l| l.contains("STATE"))
+        .map(|l| l.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 #[cfg(windows)]
 fn uninstall_windows() -> Result<(), String> {
-    remove_autostart();
+    // Stop + remove the service before touching DNS, so port 53 is released
+    // cleanly and the failure-restart policy doesn't resurrect it.
+    stop_service_scm();
+    delete_service_scm();
+    remove_service_binary();
     let path = windows_backup_path();
     let json = std::fs::read_to_string(&path)
         .map_err(|e| format!("no backup found at {}: {}", path.display(), e))?;
@@ -1048,6 +1254,62 @@ pub fn install_service() -> Result<(), String> {
     result
 }
 
+/// Start the service. If already installed, just starts it via the platform
+/// service manager. If not installed, falls through to a full install.
+pub fn start_service() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        install_service()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        install_service()
+    }
+    #[cfg(windows)]
+    {
+        if is_service_registered() {
+            start_service_scm()?;
+            eprintln!("  Service started.\n");
+            Ok(())
+        } else {
+            install_service()
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        Err("service start not supported on this OS".to_string())
+    }
+}
+
+/// Stop the service without uninstalling it.
+pub fn stop_service() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        uninstall_service()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        uninstall_service()
+    }
+    #[cfg(windows)]
+    {
+        let out = run_sc(&["stop", crate::windows_service::SERVICE_NAME])?;
+        if !out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            // 1062 = not started, 1060 = does not exist
+            if !text.contains("1062") && !text.contains("1060") {
+                return Err(format!("sc stop failed: {}", text.trim()));
+            }
+        }
+        eprintln!("  Service stopped.\n");
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        Err("service stop not supported on this OS".to_string())
+    }
+}
+
 /// Uninstall the Numa system service.
 pub fn uninstall_service() -> Result<(), String> {
     let _ = untrust_ca();
@@ -1117,7 +1379,14 @@ pub fn restart_service() -> Result<(), String> {
         eprintln!("  Service restarted → {}\n", version);
         Ok(())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    {
+        stop_service_scm();
+        start_service_scm()?;
+        eprintln!("  Service restarted.\n");
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         Err("service restart not supported on this OS".to_string())
     }
@@ -1133,7 +1402,11 @@ pub fn service_status() -> Result<(), String> {
     {
         service_status_linux()
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    {
+        service_status_windows()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         Err("service status not supported on this OS".to_string())
     }
@@ -1866,5 +2139,58 @@ Wireless LAN adapter Wi-Fi:
     fn try_port53_advisory_skips_malformed_bind_addr() {
         let err = std::io::Error::from(std::io::ErrorKind::AddrInUse);
         assert!(try_port53_advisory("not-an-address", &err).is_none());
+    }
+
+    #[test]
+    fn sc_query_running_service_is_registered() {
+        assert!(parse_sc_registered(true, ""));
+    }
+
+    #[test]
+    fn sc_query_stopped_service_is_registered() {
+        let output = "SERVICE_NAME: Numa\n        TYPE: 10  WIN32_OWN\n        STATE: 1  STOPPED\n";
+        assert!(parse_sc_registered(true, output));
+    }
+
+    #[test]
+    fn sc_query_missing_service_not_registered() {
+        let output = "[SC] EnumQueryServicesStatus:OpenService FAILED 1060:\n\nThe specified service does not exist as an installed service.\n";
+        assert!(!parse_sc_registered(false, output));
+    }
+
+    #[test]
+    fn sc_query_other_error_assumes_registered() {
+        // Permission denied or other errors — don't assume unregistered.
+        let output = "[SC] OpenService FAILED 5:\n\nAccess is denied.\n";
+        assert!(parse_sc_registered(false, output));
+    }
+
+    #[test]
+    fn parse_sc_state_running() {
+        let output = "SERVICE_NAME: Numa\n        TYPE               : 10  WIN32_OWN_PROCESS\n        STATE              : 4  RUNNING\n        WIN32_EXIT_CODE    : 0\n";
+        assert!(parse_sc_state(output).contains("RUNNING"));
+    }
+
+    #[test]
+    fn parse_sc_state_stopped() {
+        let output = "SERVICE_NAME: Numa\n        TYPE               : 10  WIN32_OWN_PROCESS\n        STATE              : 1  STOPPED\n";
+        assert!(parse_sc_state(output).contains("STOPPED"));
+    }
+
+    #[test]
+    fn parse_sc_state_not_installed() {
+        let output = "[SC] EnumQueryServicesStatus:OpenService FAILED 1060:\n\n";
+        assert_eq!(parse_sc_state(output), "Service is not installed.");
+    }
+
+    #[test]
+    fn parse_sc_state_empty_output() {
+        assert_eq!(parse_sc_state(""), "unknown");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_config_dir_equals_data_dir() {
+        assert_eq!(crate::config_dir(), crate::data_dir());
     }
 }
