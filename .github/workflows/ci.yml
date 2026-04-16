@@ -71,3 +71,53 @@ jobs:
         with:
           name: numa-windows-x86_64
           path: target/debug/numa.exe
+
+  integration-linux:
+    needs: [check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --release
+      - name: install / verify / re-install / uninstall
+        run: |
+          sudo ./target/release/numa install
+          sleep 2
+          curl -sf http://127.0.0.1:5380/health
+          dig @127.0.0.1 example.com +short +timeout=5 | grep -q '.'
+          sudo ./target/release/numa install
+          sleep 2
+          curl -sf http://127.0.0.1:5380/health
+          sudo ./target/release/numa uninstall
+          sleep 1
+          ! curl -sf http://127.0.0.1:5380/health 2>/dev/null
+      - name: cleanup
+        if: always()
+        run: sudo ./target/release/numa uninstall 2>/dev/null || true
+
+  integration-macos:
+    needs: [check-macos]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --release
+      - name: install / verify / re-install / uninstall
+        run: |
+          sudo ./target/release/numa install
+          sleep 2
+          curl -sf http://127.0.0.1:5380/health
+          dig @127.0.0.1 example.com +short +timeout=5 | grep -q '.'
+          sudo ./target/release/numa install
+          sleep 2
+          curl -sf http://127.0.0.1:5380/health
+          sudo ./target/release/numa uninstall
+          sleep 1
+          ! curl -sf http://127.0.0.1:5380/health 2>/dev/null
+      - name: cleanup
+        if: always()
+        run: sudo ./target/release/numa uninstall 2>/dev/null || true
