@@ -20,6 +20,7 @@ pub mod query_log;
 pub mod question;
 pub mod record;
 pub mod recursive;
+pub mod serve;
 pub mod service_store;
 pub mod setup_phone;
 pub mod srtt;
@@ -28,11 +29,22 @@ pub mod system_dns;
 pub mod tls;
 pub mod wire;
 
+#[cfg(windows)]
+pub mod windows_service;
+
 #[cfg(test)]
 pub(crate) mod testutil;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Build version string. On tagged releases: `0.13.1`. On commits ahead
+/// of a tag: `0.13.1+a87f907`. With uncommitted changes: `0.13.1+a87f907-dirty`.
+/// Falls back to `CARGO_PKG_VERSION` when built outside a git repo (e.g.
+/// from a source tarball).
+pub fn version() -> &'static str {
+    option_env!("NUMA_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
 
 /// Detect the machine hostname via the `hostname` command. Returns the
 /// full hostname (e.g., `macbook-pro.local`), or `"numa"` if the command
@@ -89,14 +101,11 @@ where
 /// Linux root daemon: /var/lib/numa (FHS) — falls back to /usr/local/var/numa
 ///                    if a pre-v0.10.1 install already lives there.
 /// macOS root daemon: /usr/local/var/numa (Homebrew prefix)
-/// Windows: %APPDATA%\numa
+/// Windows: %PROGRAMDATA%\numa (same as data_dir — no per-user config on Windows)
 pub fn config_dir() -> std::path::PathBuf {
     #[cfg(windows)]
     {
-        std::path::PathBuf::from(
-            std::env::var("APPDATA").unwrap_or_else(|_| "C:\\ProgramData".into()),
-        )
-        .join("numa")
+        data_dir()
     }
     #[cfg(not(windows))]
     {
