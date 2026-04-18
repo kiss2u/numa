@@ -22,7 +22,9 @@ StateDirectoryMode=0750
 ConfigurationDirectory=numa
 ConfigurationDirectoryMode=0755
 
-# Sandboxing
+# Sandboxing — conservative set known to work with Rust network daemons.
+# Aggressive hardening (MemoryDenyWriteExecute, SystemCallFilter, seccomp
+# allow-lists) can be layered on once tested in isolation.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -31,14 +33,8 @@ PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-LockPersonality=true
-MemoryDenyWriteExecute=true
-RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
-SystemCallArchitectures=native
-SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
 # AF_NETLINK for interface enumeration on network changes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 
