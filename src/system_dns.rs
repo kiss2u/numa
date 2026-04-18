@@ -1664,10 +1664,65 @@ fn uninstall_linux() -> Result<(), String> {
     Ok(())
 }
 
+/// Fallback install location when current_exe() sits on a path the
+/// dynamic user cannot traverse (e.g. `/home/<user>/` mode 0700).
+#[cfg(target_os = "linux")]
+fn linux_service_exe_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("/usr/local/bin/numa")
+}
+
+/// True iff every ancestor of `p` (excluding `/`) grants world-execute —
+/// i.e. the `DynamicUser=yes` service account can traverse the path and
+/// exec the binary without being in any group. Linuxbrew's
+/// `/home/linuxbrew` is 0755 (traversable, keep brew's path, upgrades
+/// via `brew` propagate). A build tree under `/home/<user>/` (0700) or
+/// `~/.cargo/bin/` is not (copy to /usr/local/bin so systemd can reach it).
+#[cfg(target_os = "linux")]
+fn path_world_traversable_linux(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let mut current = p;
+    while let Some(parent) = current.parent() {
+        if parent.as_os_str().is_empty() || parent == std::path::Path::new("/") {
+            break;
+        }
+        match std::fs::metadata(parent) {
+            Ok(m) if m.permissions().mode() & 0o001 != 0 => {}
+            _ => return false,
+        }
+        current = parent;
+    }
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn install_service_binary_linux() -> Result<std::path::PathBuf, String> {
+    let src = std::env::current_exe().map_err(|e| format!("current_exe(): {}", e))?;
+    if path_world_traversable_linux(&src) {
+        return Ok(src);
+    }
+    let dst = linux_service_exe_path();
+    if src == dst {
+        return Ok(dst);
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
+    }
+    std::fs::copy(&src, &dst).map_err(|e| {
+        format!(
+            "failed to copy {} -> {}: {}",
+            src.display(),
+            dst.display(),
+            e
+        )
+    })?;
+    Ok(dst)
+}
+
 #[cfg(target_os = "linux")]
 fn install_service_linux() -> Result<(), String> {
-    let unit = include_str!("../numa.service");
-    let unit = replace_exe_path(unit)?;
+    let exe = install_service_binary_linux()?;
+    let unit = include_str!("../numa.service").replace("{{exe_path}}", &exe.to_string_lossy());
     std::fs::write(SYSTEMD_UNIT, unit)
         .map_err(|e| format!("failed to write {}: {}", SYSTEMD_UNIT, e))?;
 
