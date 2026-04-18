@@ -8,6 +8,40 @@ Type=simple
 ExecStart={{exe_path}}
 Restart=always
 RestartSec=2
+
+User=numa
+Group=numa
+
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# StateDirectory maps to crate::data_dir() default on Linux (/var/lib/numa).
+# systemd auto-creates + chowns on every start, fixing legacy root-owned trees.
+StateDirectory=numa
+StateDirectoryMode=0750
+ConfigurationDirectory=numa
+ConfigurationDirectoryMode=0755
+
+# Sandboxing
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# AF_NETLINK for interface enumeration on network changes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=numa
