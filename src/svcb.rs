@@ -84,11 +84,7 @@ pub fn strip_ipv6hint(rdata: &[u8]) -> Option<Vec<u8>> {
 /// (key, value) param pairs. Shared by `svcb` unit tests and `ctx`
 /// pipeline tests that need to seed the cache with a synthetic HTTPS RR.
 #[cfg(test)]
-pub(crate) fn build_rdata(
-    priority: u16,
-    target: &[&str],
-    params: &[(u16, Vec<u8>)],
-) -> Vec<u8> {
+pub(crate) fn build_rdata(priority: u16, target: &[&str], params: &[(u16, Vec<u8>)]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&priority.to_be_bytes());
     for label in target {
