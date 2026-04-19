@@ -511,9 +511,6 @@ fn strip_dnssec_records(pkt: &mut DnsPacket) {
     pkt.resources.retain(|r| !is_dnssec_record(r));
 }
 
-/// SVCB and HTTPS share the same RDATA wire format (RFC 9460), so the
-/// ipv6hint strip applies to both. SVCB has no `QueryType` variant — it
-/// arrives as `UNKNOWN { qtype: 64, .. }`.
 const SVCB_QTYPE: u16 = 64;
 
 fn strip_svcb_ipv6_hints(pkt: &mut DnsPacket) {
@@ -1280,11 +1277,6 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_filter_aaaa_strips_ipv6hint_from_https_and_svcb() {
-        // HTTPS (type 65) and SVCB (type 64) share the same RDATA wire
-        // format (RFC 9460); the filter must strip ipv6hint from both.
-        // Build one HTTPS record with alpn + ipv6hint, then re-key it as
-        // SVCB and assert the returned rdata has the 20-byte hint removed
-        // in both cases.
         let rdata = crate::svcb::build_rdata(
             1,
             &[],
@@ -1313,8 +1305,6 @@ mod tests {
             ttl: 300,
         });
 
-        // Seed an SVCB record (type 64) under a different name — same wire
-        // format as HTTPS, must get the same treatment.
         let mut svcb_pkt = pkt.clone();
         svcb_pkt.questions[0].name = "svc.test".to_string();
         svcb_pkt.questions[0].qtype = QueryType::UNKNOWN(64);
