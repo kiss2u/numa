@@ -511,13 +511,12 @@ fn strip_dnssec_records(pkt: &mut DnsPacket) {
     pkt.resources.retain(|r| !is_dnssec_record(r));
 }
 
-const SVCB_QTYPE: u16 = 64;
-
 fn strip_svcb_ipv6_hints(pkt: &mut DnsPacket) {
     let https_qtype = QueryType::HTTPS.to_num();
+    let svcb_qtype = QueryType::SVCB.to_num();
     pkt.for_each_record_mut(|rec| {
         if let DnsRecord::UNKNOWN { qtype, data, .. } = rec {
-            if *qtype == https_qtype || *qtype == SVCB_QTYPE {
+            if *qtype == https_qtype || *qtype == svcb_qtype {
                 if let Some(new_data) = crate::svcb::strip_ipv6hint(data) {
                     *data = new_data;
                 }
@@ -1307,7 +1306,7 @@ mod tests {
 
         let mut svcb_pkt = pkt.clone();
         svcb_pkt.questions[0].name = "svc.test".to_string();
-        svcb_pkt.questions[0].qtype = QueryType::UNKNOWN(64);
+        svcb_pkt.questions[0].qtype = QueryType::SVCB;
         if let DnsRecord::UNKNOWN { domain, qtype, .. } = &mut svcb_pkt.answers[0] {
             *domain = "svc.test".to_string();
             *qtype = 64;
@@ -1322,12 +1321,12 @@ mod tests {
         ctx.cache
             .write()
             .unwrap()
-            .insert("svc.test", QueryType::UNKNOWN(64), &svcb_pkt);
+            .insert("svc.test", QueryType::SVCB, &svcb_pkt);
         let ctx = Arc::new(ctx);
 
         for (name, qtype, label) in [
             ("hints.test", QueryType::HTTPS, "HTTPS"),
-            ("svc.test", QueryType::UNKNOWN(64), "SVCB"),
+            ("svc.test", QueryType::SVCB, "SVCB"),
         ] {
             let (resp, path) = resolve_in_test(&ctx, name, qtype).await;
             assert_eq!(path, QueryPath::Cached, "{label}");

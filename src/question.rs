@@ -12,13 +12,16 @@ pub enum QueryType {
     MX,     // 15
     TXT,    // 16
     AAAA,   // 28
+    LOC,    // 29
     SRV,    // 33
+    NAPTR,  // 35
     DS,     // 43
     RRSIG,  // 46
     NSEC,   // 47
     DNSKEY, // 48
     NSEC3,  // 50
     OPT,    // 41 (EDNS0 pseudo-type)
+    SVCB,   // 64
     HTTPS,  // 65
 }
 
@@ -34,13 +37,16 @@ impl QueryType {
             QueryType::MX => 15,
             QueryType::TXT => 16,
             QueryType::AAAA => 28,
+            QueryType::LOC => 29,
             QueryType::SRV => 33,
+            QueryType::NAPTR => 35,
             QueryType::OPT => 41,
             QueryType::DS => 43,
             QueryType::RRSIG => 46,
             QueryType::NSEC => 47,
             QueryType::DNSKEY => 48,
             QueryType::NSEC3 => 50,
+            QueryType::SVCB => 64,
             QueryType::HTTPS => 65,
         }
     }
@@ -55,13 +61,16 @@ impl QueryType {
             15 => QueryType::MX,
             16 => QueryType::TXT,
             28 => QueryType::AAAA,
+            29 => QueryType::LOC,
             33 => QueryType::SRV,
+            35 => QueryType::NAPTR,
             41 => QueryType::OPT,
             43 => QueryType::DS,
             46 => QueryType::RRSIG,
             47 => QueryType::NSEC,
             48 => QueryType::DNSKEY,
             50 => QueryType::NSEC3,
+            64 => QueryType::SVCB,
             65 => QueryType::HTTPS,
             _ => QueryType::UNKNOWN(num),
         }
@@ -77,13 +86,16 @@ impl QueryType {
             QueryType::MX => "MX",
             QueryType::TXT => "TXT",
             QueryType::AAAA => "AAAA",
+            QueryType::LOC => "LOC",
             QueryType::SRV => "SRV",
+            QueryType::NAPTR => "NAPTR",
             QueryType::OPT => "OPT",
             QueryType::DS => "DS",
             QueryType::RRSIG => "RRSIG",
             QueryType::NSEC => "NSEC",
             QueryType::DNSKEY => "DNSKEY",
             QueryType::NSEC3 => "NSEC3",
+            QueryType::SVCB => "SVCB",
             QueryType::HTTPS => "HTTPS",
             QueryType::UNKNOWN(_) => "UNKNOWN",
         }
@@ -99,12 +111,15 @@ impl QueryType {
             "MX" => Some(QueryType::MX),
             "TXT" => Some(QueryType::TXT),
             "AAAA" => Some(QueryType::AAAA),
+            "LOC" => Some(QueryType::LOC),
             "SRV" => Some(QueryType::SRV),
+            "NAPTR" => Some(QueryType::NAPTR),
             "DS" => Some(QueryType::DS),
             "RRSIG" => Some(QueryType::RRSIG),
             "DNSKEY" => Some(QueryType::DNSKEY),
             "NSEC" => Some(QueryType::NSEC),
             "NSEC3" => Some(QueryType::NSEC3),
+            "SVCB" => Some(QueryType::SVCB),
             "HTTPS" => Some(QueryType::HTTPS),
             _ => None,
         }
