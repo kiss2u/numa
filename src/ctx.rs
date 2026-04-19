@@ -347,8 +347,10 @@ pub async fn resolve_query(
 
     // filter_aaaa: also strip ipv6hint from HTTPS/SVCB answers so modern
     // browsers (Chrome ≥103 etc.) don't receive v6 address hints via the
-    // HTTPS record path that bypasses AAAA entirely.
-    if ctx.filter_aaaa {
+    // HTTPS record path that bypasses AAAA entirely. Gated on !client_do
+    // because modifying rdata invalidates any accompanying RRSIG — a DO-bit
+    // validator downstream would reject the response as Bogus.
+    if ctx.filter_aaaa && !client_do {
         strip_https_ipv6_hints(&mut response);
     }
 
@@ -1336,6 +1338,71 @@ mod tests {
                 assert!(
                     !data.windows(4).any(|w| w == [0, 6, 0, 16]),
                     "ipv6hint TLV header must be absent"
+                );
+            }
+            other => panic!("expected UNKNOWN record, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_filter_aaaa_preserves_ipv6hint_for_dnssec_clients() {
+        // Regression guard for the DO-bit gate in resolve_query: modifying
+        // HTTPS rdata invalidates any accompanying RRSIG, so a DO=1 client
+        // must receive the record untouched even when filter_aaaa is on.
+        let mut rdata = Vec::new();
+        rdata.extend_from_slice(&1u16.to_be_bytes());
+        rdata.push(0);
+        rdata.extend_from_slice(&6u16.to_be_bytes());
+        rdata.extend_from_slice(&16u16.to_be_bytes());
+        rdata.extend_from_slice(&[
+            0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+        ]);
+
+        let mut pkt = DnsPacket::new();
+        pkt.header.response = true;
+        pkt.header.rescode = ResultCode::NOERROR;
+        pkt.questions.push(crate::question::DnsQuestion {
+            name: "hints.test".to_string(),
+            qtype: QueryType::HTTPS,
+        });
+        pkt.answers.push(DnsRecord::UNKNOWN {
+            domain: "hints.test".to_string(),
+            qtype: 65,
+            data: rdata.clone(),
+            ttl: 300,
+        });
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.filter_aaaa = true;
+        ctx.cache
+            .write()
+            .unwrap()
+            .insert("hints.test", QueryType::HTTPS, &pkt);
+        let ctx = Arc::new(ctx);
+
+        // Build a query with EDNS DO bit set — can't use resolve_in_test
+        // because it constructs a plain query without EDNS.
+        let mut query = DnsPacket::query(0xBEEF, "hints.test", QueryType::HTTPS);
+        query.edns = Some(crate::packet::EdnsOpt {
+            do_bit: true,
+            ..Default::default()
+        });
+        let mut buf = BytePacketBuffer::new();
+        query.write(&mut buf).unwrap();
+        let raw = &buf.buf[..buf.pos];
+        let src: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+
+        let (resp_buf, _) = resolve_query(query, raw, src, &ctx, Transport::Udp)
+            .await
+            .unwrap();
+        let mut resp_parse_buf = BytePacketBuffer::from_bytes(resp_buf.filled());
+        let resp = DnsPacket::from_buffer(&mut resp_parse_buf).unwrap();
+
+        match &resp.answers[0] {
+            DnsRecord::UNKNOWN { data, .. } => {
+                assert_eq!(
+                    data, &rdata,
+                    "ipv6hint must be preserved for DO-bit clients"
                 );
             }
             other => panic!("expected UNKNOWN record, got {:?}", other),
