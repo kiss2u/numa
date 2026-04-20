@@ -29,6 +29,10 @@ rustls = "0.23"
 tokio-rustls = "0.26"
 arc-swap = "1"
 ring = "0.17"
+odoh-rs = "1"
+# rand_core 0.9 matches the version odoh-rs (via hpke 0.13) depends on, so we
+# share one RngCore trait and OsRng impl across the dep tree.
+rand_core = { version = "0.9", features = ["os_rng"] }
 rustls-pemfile = "2.2.0"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 webpki-roots = "1"

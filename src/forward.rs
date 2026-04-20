@@ -1,14 +1,16 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
 use crate::buffer::BytePacketBuffer;
+use crate::odoh::{query_through_relay, OdohConfigCache};
 use crate::packet::DnsPacket;
 use crate::srtt::SrttCache;
+use crate::stats::UpstreamTransport;
 use crate::Result;
 
 #[derive(Clone)]
@@ -23,16 +25,34 @@ pub enum Upstream {
         tls_name: Option<String>,
         connector: tokio_rustls::TlsConnector,
     },
+    /// Oblivious DNS-over-HTTPS (RFC 9230). Queries are HPKE-sealed to the
+    /// target and forwarded through an independent relay. Target host lives
+    /// on `target_config` (single source of truth — the cache keys on it).
+    Odoh {
+        relay_url: String,
+        target_path: String,
+        client: reqwest::Client,
+        target_config: Arc<OdohConfigCache>,
+    },
 }
 
 impl Upstream {
     /// IP address to key SRTT tracking on, if the upstream has a stable one.
-    /// `Doh` routes through a URL + connection pool, so there's no single IP
-    /// to track; SRTT is skipped for it.
+    /// `Doh` and `Odoh` route through a URL + connection pool, so there's no
+    /// single IP to track; SRTT is skipped for them.
     pub fn tracked_ip(&self) -> Option<IpAddr> {
         match self {
             Upstream::Udp(addr) | Upstream::Dot { addr, .. } => Some(addr.ip()),
-            Upstream::Doh { .. } => None,
+            Upstream::Doh { .. } | Upstream::Odoh { .. } => None,
+        }
+    }
+
+    pub fn transport(&self) -> UpstreamTransport {
+        match self {
+            Upstream::Udp(_) => UpstreamTransport::Udp,
+            Upstream::Doh { .. } => UpstreamTransport::Doh,
+            Upstream::Dot { .. } => UpstreamTransport::Dot,
+            Upstream::Odoh { .. } => UpstreamTransport::Odoh,
         }
     }
 }
@@ -43,6 +63,20 @@ impl PartialEq for Upstream {
             (Self::Udp(a), Self::Udp(b)) => a == b,
             (Self::Doh { url: a, .. }, Self::Doh { url: b, .. }) => a == b,
             (Self::Dot { addr: a, .. }, Self::Dot { addr: b, .. }) => a == b,
+            (
+                Self::Odoh {
+                    relay_url: ra,
+                    target_path: pa,
+                    target_config: ca,
+                    ..
+                },
+                Self::Odoh {
+                    relay_url: rb,
+                    target_path: pb,
+                    target_config: cb,
+                    ..
+                },
+            ) => ra == rb && pa == pb && ca.target_host() == cb.target_host(),
             _ => false,
         }
     }
@@ -63,6 +97,18 @@ impl fmt::Display for Upstream {
                 Some(name) => write!(f, "tls://{}#{}", addr, name),
                 None => write!(f, "tls://{}", addr),
             },
+            Upstream::Odoh {
+                relay_url,
+                target_path,
+                target_config,
+                ..
+            } => write!(
+                f,
+                "odoh://{}{} via {}",
+                target_config.target_host(),
+                target_path,
+                relay_url
+            ),
         }
     }
 }
@@ -82,22 +128,20 @@ pub(crate) fn parse_upstream_addr(
     Err(format!("invalid upstream address: {}", s))
 }
 
+/// Parse a slice of upstream address strings into `Upstream` values, failing
+/// on the first invalid entry.
+pub fn parse_upstream_list(addrs: &[String], default_port: u16) -> Result<Vec<Upstream>> {
+    addrs
+        .iter()
+        .map(|s| parse_upstream(s, default_port))
+        .collect()
+}
+
 pub fn parse_upstream(s: &str, default_port: u16) -> Result<Upstream> {
     if s.starts_with("https://") {
-        let client = reqwest::Client::builder()
-            .use_rustls_tls()
-            .http2_initial_stream_window_size(65_535)
-            .http2_initial_connection_window_size(65_535)
-            .http2_keep_alive_interval(Duration::from_secs(15))
-            .http2_keep_alive_while_idle(true)
-            .http2_keep_alive_timeout(Duration::from_secs(10))
-            .pool_idle_timeout(Duration::from_secs(300))
-            .pool_max_idle_per_host(1)
-            .build()
-            .unwrap_or_default();
         return Ok(Upstream::Doh {
             url: s.to_string(),
-            client,
+            client: build_https_client(),
         });
     }
     // tls://IP:PORT#hostname  or  tls://IP#hostname  (default port 853)
@@ -116,6 +160,50 @@ pub fn parse_upstream(s: &str, default_port: u16) -> Result<Upstream> {
     }
     let addr = parse_upstream_addr(s, default_port)?;
     Ok(Upstream::Udp(addr))
+}
+
+/// HTTP/2 client tuned for DoH/ODoH: small windows for low latency, long-lived
+/// keep-alive. Shared by the DoH upstream and the ODoH config-fetcher +
+/// seal/open path. Pool defaults to one idle conn per host — good for
+/// resolvers that talk to a single upstream; relays that fan out to many
+/// targets should use [`build_https_client_with_pool`].
+pub fn build_https_client() -> reqwest::Client {
+    build_https_client_with_pool(1)
+}
+
+/// Same shape as [`build_https_client`], but caller picks
+/// `pool_max_idle_per_host`. Relay workloads hit many distinct target hosts
+/// and benefit from a larger pool so warm connections survive concurrent
+/// fan-out.
+pub fn build_https_client_with_pool(pool_max_idle_per_host: usize) -> reqwest::Client {
+    https_client_builder(pool_max_idle_per_host)
+        .build()
+        .unwrap_or_default()
+}
+
+/// HTTPS client for the ODoH upstream, with bootstrap-IP overrides applied
+/// so relay/target hostname resolution can bypass system DNS.
+pub fn build_odoh_client(odoh: &crate::config::OdohUpstream) -> reqwest::Client {
+    let mut builder = https_client_builder(1);
+    if let Some(addr) = odoh.relay_bootstrap {
+        builder = builder.resolve(&odoh.relay_host, addr);
+    }
+    if let Some(addr) = odoh.target_bootstrap {
+        builder = builder.resolve(&odoh.target_host, addr);
+    }
+    builder.build().unwrap_or_default()
+}
+
+fn https_client_builder(pool_max_idle_per_host: usize) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .use_rustls_tls()
+        .http2_initial_stream_window_size(65_535)
+        .http2_initial_connection_window_size(65_535)
+        .http2_keep_alive_interval(Duration::from_secs(15))
+        .http2_keep_alive_while_idle(true)
+        .http2_keep_alive_timeout(Duration::from_secs(10))
+        .pool_idle_timeout(Duration::from_secs(300))
+        .pool_max_idle_per_host(pool_max_idle_per_host)
 }
 
 fn build_dot_connector() -> Result<tokio_rustls::TlsConnector> {
@@ -282,6 +370,22 @@ pub async fn forward_query_raw(
             tls_name,
             connector,
         } => forward_dot_raw(wire, *addr, tls_name, connector, timeout_duration).await,
+        Upstream::Odoh {
+            relay_url,
+            target_path,
+            client,
+            target_config,
+        } => {
+            query_through_relay(
+                wire,
+                relay_url,
+                target_path,
+                client,
+                target_config,
+                timeout_duration,
+            )
+            .await
+        }
     }
 }
 

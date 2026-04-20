@@ -854,6 +854,203 @@ sleep 1
 
 fi  # end Suite 7
 
+# ---- Suite 8: ODoH (Oblivious DoH via public relay + target) ----
+# Exercises the full client pipeline: /.well-known/odohconfigs fetch,
+# HPKE seal/unseal, URL-query target routing (RFC 9230 §5), dashboard
+# QueryPath::Odoh counter. Depends on the public ecosystem being up —
+# the probe-odoh-ecosystem.sh script guards against flaky runs.
+if should_run_suite 8; then
+echo ""
+echo "╔══════════════════════════════════════════╗"
+echo "║  Suite 8: ODoH (Anonymous DNS)           ║"
+echo "╚══════════════════════════════════════════╝"
+
+run_test_suite "ODoH via edgecompute.app relay → Cloudflare target" "
+[server]
+bind_addr = \"127.0.0.1:5354\"
+api_port = 5381
+
+[upstream]
+mode = \"odoh\"
+relay = \"https://odoh-relay.edgecompute.app/proxy\"
+target = \"https://odoh.cloudflare-dns.com/dns-query\"
+
+[cache]
+max_entries = 10000
+min_ttl = 60
+max_ttl = 86400
+
+[blocking]
+enabled = false
+
+[proxy]
+enabled = false
+"
+
+# Re-start briefly to assert ODoH-specific observability: the odoh counter
+# has to tick above zero after a query, and the stats label has to reflect
+# the oblivious path. These guard against silent regressions in the
+# QueryPath::Odoh tagging and the /stats serialisation.
+RUST_LOG=info "$BINARY" "$CONFIG" > "$LOG" 2>&1 &
+NUMA_PID=$!
+for _ in $(seq 1 30); do
+    curl -sf "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1 && break
+    sleep 0.1
+done
+
+$DIG example.com A +short > /dev/null 2>&1 || true
+sleep 1
+
+STATS=$(curl -sf http://127.0.0.1:$API_PORT/stats 2>/dev/null)
+# upstream_transport.odoh lives inside the upstream_transport object.
+ODOH_COUNT=$(echo "$STATS" | grep -o '"upstream_transport":{[^}]*}' \
+    | grep -o '"odoh":[0-9]*' | cut -d: -f2)
+check "upstream_transport.odoh > 0 after a query" "[1-9]" "${ODOH_COUNT:-0}"
+
+check "Upstream label advertises odoh://" \
+    "odoh://" \
+    "$(echo "$STATS" | grep -o '"upstream":"[^"]*"')"
+
+check "Stats mode field is 'odoh'" \
+    '"mode":"odoh"' \
+    "$(echo "$STATS" | grep -o '"mode":"odoh"')"
+
+# Strict-mode failure path: a clearly-unreachable relay must produce
+# SERVFAIL without silent downgrade. We hijack the config to point at
+# an .invalid host so we don't rely on external uptime.
+kill "$NUMA_PID" 2>/dev/null || true
+wait "$NUMA_PID" 2>/dev/null || true
+sleep 1
+
+cat > "$CONFIG" << 'CONF'
+[server]
+bind_addr = "127.0.0.1:5354"
+api_port = 5381
+
+[upstream]
+mode = "odoh"
+relay = "https://relay.invalid/proxy"
+target = "https://odoh.cloudflare-dns.com/dns-query"
+strict = true
+
+[cache]
+max_entries = 10000
+
+[blocking]
+enabled = false
+
+[proxy]
+enabled = false
+CONF
+
+RUST_LOG=info "$BINARY" "$CONFIG" > "$LOG" 2>&1 &
+NUMA_PID=$!
+for _ in $(seq 1 30); do
+    curl -sf "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1 && break
+    sleep 0.1
+done
+
+check "Strict-mode relay outage returns SERVFAIL" \
+    "SERVFAIL" \
+    "$($DIG example.com A 2>&1 | grep 'status:')"
+
+kill "$NUMA_PID" 2>/dev/null || true
+wait "$NUMA_PID" 2>/dev/null || true
+sleep 1
+
+# Negative: relay and target on the same host must be rejected at startup.
+cat > "$CONFIG" << 'CONF'
+[server]
+bind_addr = "127.0.0.1:5354"
+api_port = 5381
+
+[upstream]
+mode = "odoh"
+relay = "https://odoh.cloudflare-dns.com/proxy"
+target = "https://odoh.cloudflare-dns.com/dns-query"
+CONF
+
+STARTUP_OUT=$("$BINARY" "$CONFIG" 2>&1 || true)
+check "Same-host relay+target rejected at startup" \
+    "same host" \
+    "$STARTUP_OUT"
+
+fi  # end Suite 8
+
+# ---- Suite 9: Numa's own ODoH relay (--relay-mode) ----
+# Exercises `numa relay PORT` as a forwarding proxy to a real ODoH target.
+# Validates the RFC 9230 §5 relay behaviour: URL-query routing, content-type
+# gating, body-size cap, and /health observability.
+if should_run_suite 9; then
+echo ""
+echo "╔══════════════════════════════════════════╗"
+echo "║  Suite 9: Numa ODoH Relay (own)          ║"
+echo "╚══════════════════════════════════════════╝"
+
+RELAY_PORT=18443
+"$BINARY" relay $RELAY_PORT > "$LOG" 2>&1 &
+NUMA_PID=$!
+for _ in $(seq 1 30); do
+    curl -sf "http://127.0.0.1:$RELAY_PORT/health" >/dev/null 2>&1 && break
+    sleep 0.1
+done
+
+echo ""
+echo "=== Relay Endpoints ==="
+
+check "Health endpoint returns ok" \
+    "ok" \
+    "$(curl -sf http://127.0.0.1:$RELAY_PORT/health | head -1)"
+
+# Happy path: forwards arbitrary body to Cloudflare's ODoH target. The
+# target will reject the garbage envelope with HTTP 400 — which is exactly
+# what proves our relay faithfully forwarded (otherwise we'd see our own
+# 4xx from the relay itself).
+HAPPY_STATUS=$(curl -sS -o /dev/null -w "%{http_code}" -X POST \
+    -H "Content-Type: application/oblivious-dns-message" \
+    --data-binary "garbage-forwarded-end-to-end" \
+    "http://127.0.0.1:$RELAY_PORT/relay?targethost=odoh.cloudflare-dns.com&targetpath=/dns-query")
+check "Relay forwards to target (target rejects garbage → 400)" \
+    "400" \
+    "$HAPPY_STATUS"
+
+echo ""
+echo "=== Guards ==="
+
+check "Missing content-type → 415" \
+    "415" \
+    "$(curl -sS -o /dev/null -w '%{http_code}' -X POST --data-binary 'x' \
+        'http://127.0.0.1:'$RELAY_PORT'/relay?targethost=odoh.cloudflare-dns.com&targetpath=/dns-query')"
+
+check "Oversized body (>4 KiB) → 413" \
+    "413" \
+    "$(head -c 5000 /dev/urandom | curl -sS -o /dev/null -w '%{http_code}' -X POST \
+        -H 'Content-Type: application/oblivious-dns-message' --data-binary @- \
+        'http://127.0.0.1:'$RELAY_PORT'/relay?targethost=odoh.cloudflare-dns.com&targetpath=/dns-query')"
+
+check "Invalid targethost (no dot) → 400" \
+    "400" \
+    "$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+        -H 'Content-Type: application/oblivious-dns-message' --data-binary 'x' \
+        'http://127.0.0.1:'$RELAY_PORT'/relay?targethost=invalid&targetpath=/dns-query')"
+
+echo ""
+echo "=== Counters ==="
+
+HEALTH=$(curl -sf "http://127.0.0.1:$RELAY_PORT/health")
+check "Relay counted at least one forwarded_ok" \
+    "[1-9]" \
+    "$(echo "$HEALTH" | grep 'forwarded_ok' | awk '{print $2}')"
+check "Relay counted at least one rejected_bad_request" \
+    "[1-9]" \
+    "$(echo "$HEALTH" | grep 'rejected_bad_request' | awk '{print $2}')"
+
+kill "$NUMA_PID" 2>/dev/null || true
+wait "$NUMA_PID" 2>/dev/null || true
+sleep 1
+
+fi  # end Suite 9
+
 # Summary
 echo ""
 TOTAL=$((PASSED + FAILED))

@@ -17,7 +17,10 @@ use crate::buffer::BytePacketBuffer;
 use crate::cache::DnsCache;
 use crate::config::{build_zone_map, load_config, ConfigLoad};
 use crate::ctx::{handle_query, ServerCtx};
-use crate::forward::{parse_upstream, Upstream, UpstreamPool};
+use crate::forward::{
+    build_https_client, build_odoh_client, parse_upstream_list, Upstream, UpstreamPool,
+};
+use crate::odoh::OdohConfigCache;
 use crate::override_store::OverrideStore;
 use crate::query_log::QueryLog;
 use crate::service_store::ServiceStore;
@@ -54,10 +57,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
                 (crate::config::UpstreamMode::Recursive, false, pool, label)
             } else {
                 log::warn!("recursive probe failed — falling back to Quad9 DoH");
-                let client = reqwest::Client::builder()
-                    .use_rustls_tls()
-                    .build()
-                    .unwrap_or_default();
+                let client = build_https_client();
                 let url = DOH_FALLBACK.to_string();
                 let label = url.clone();
                 let pool = UpstreamPool::new(vec![Upstream::Doh { url, client }], vec![]);
@@ -82,16 +82,8 @@ pub async fn run(config_path: String) -> crate::Result<()> {
                 config.upstream.address.clone()
             };
 
-            let primary: Vec<Upstream> = addrs
-                .iter()
-                .map(|s| parse_upstream(s, config.upstream.port))
-                .collect::<crate::Result<Vec<_>>>()?;
-            let fallback: Vec<Upstream> = config
-                .upstream
-                .fallback
-                .iter()
-                .map(|s| parse_upstream(s, config.upstream.port))
-                .collect::<crate::Result<Vec<_>>>()?;
+            let primary = parse_upstream_list(&addrs, config.upstream.port)?;
+            let fallback = parse_upstream_list(&config.upstream.fallback, config.upstream.port)?;
 
             let pool = UpstreamPool::new(primary, fallback);
             let label = pool.label();
@@ -101,6 +93,28 @@ pub async fn run(config_path: String) -> crate::Result<()> {
                 pool,
                 label,
             )
+        }
+        crate::config::UpstreamMode::Odoh => {
+            let odoh = config.upstream.odoh_upstream()?;
+            let client = build_odoh_client(&odoh);
+            let target_config = Arc::new(OdohConfigCache::new(
+                odoh.target_host.clone(),
+                client.clone(),
+            ));
+            let primary = vec![Upstream::Odoh {
+                relay_url: odoh.relay_url,
+                target_path: odoh.target_path,
+                client,
+                target_config,
+            }];
+            let fallback = if odoh.strict {
+                Vec::new()
+            } else {
+                parse_upstream_list(&config.upstream.fallback, config.upstream.port)?
+            };
+            let pool = UpstreamPool::new(primary, fallback);
+            let label = pool.label();
+            (crate::config::UpstreamMode::Odoh, false, pool, label)
         }
     };
     let api_port = config.server.api_port;
@@ -213,7 +227,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         upstream_port: config.upstream.port,
         lan_ip: Mutex::new(crate::lan::detect_lan_ip().unwrap_or(std::net::Ipv4Addr::LOCALHOST)),
         timeout: Duration::from_millis(config.upstream.timeout_ms),
-        hedge_delay: Duration::from_millis(config.upstream.hedge_ms),
+        hedge_delay: resolved_mode.hedge_delay(config.upstream.hedge_ms),
         proxy_tld_suffix: if config.proxy.tld.is_empty() {
             String::new()
         } else {

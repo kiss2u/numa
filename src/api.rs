@@ -170,6 +170,7 @@ struct StatsResponse {
     srtt: bool,
     queries: QueriesStats,
     transport: TransportStats,
+    upstream_transport: UpstreamTransportStats,
     cache: CacheStats,
     overrides: OverrideStats,
     blocking: BlockingStatsResponse,
@@ -184,6 +185,14 @@ struct TransportStats {
     tcp: u64,
     dot: u64,
     doh: u64,
+}
+
+#[derive(Serialize)]
+struct UpstreamTransportStats {
+    udp: u64,
+    doh: u64,
+    dot: u64,
+    odoh: u64,
 }
 
 #[derive(Serialize)]
@@ -565,6 +574,12 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
             tcp: snap.transport_tcp,
             dot: snap.transport_dot,
             doh: snap.transport_doh,
+        },
+        upstream_transport: UpstreamTransportStats {
+            udp: snap.upstream_transport_udp,
+            doh: snap.upstream_transport_doh,
+            dot: snap.upstream_transport_dot,
+            odoh: snap.upstream_transport_odoh,
         },
         cache: CacheStats {
             entries: cache_len,

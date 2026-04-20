@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
-use std::net::Ipv6Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -134,6 +134,7 @@ pub enum UpstreamMode {
     #[default]
     Forward,
     Recursive,
+    Odoh,
 }
 
 impl UpstreamMode {
@@ -142,6 +143,20 @@ impl UpstreamMode {
             UpstreamMode::Auto => "auto",
             UpstreamMode::Forward => "forward",
             UpstreamMode::Recursive => "recursive",
+            UpstreamMode::Odoh => "odoh",
+        }
+    }
+
+    /// Hedging duplicates the in-flight query against the same upstream to
+    /// rescue tail latency. Beneficial for UDP/DoH/DoT (cheap retransmit /
+    /// h2 stream multiplexing). For ODoH it doubles the relay's HPKE
+    /// seal/unseal load and the sealed-byte footprint a passive observer
+    /// can correlate, with no latency win — the relay hop dominates either
+    /// way. Force-zero in oblivious mode regardless of `hedge_ms`.
+    pub fn hedge_delay(self, hedge_ms: u64) -> Duration {
+        match self {
+            UpstreamMode::Odoh => Duration::ZERO,
+            _ => Duration::from_millis(hedge_ms),
         }
     }
 }
@@ -154,7 +169,7 @@ pub struct UpstreamConfig {
     pub address: Vec<String>,
     #[serde(default = "default_upstream_port")]
     pub port: u16,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_or_vec")]
     pub fallback: Vec<String>,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
@@ -166,6 +181,30 @@ pub struct UpstreamConfig {
     pub prime_tlds: Vec<String>,
     #[serde(default = "default_srtt")]
     pub srtt: bool,
+
+    /// Only used when `mode = "odoh"`. Full https:// URL of the relay
+    /// endpoint (including path, e.g. `https://odoh-relay.numa.rs/relay`).
+    #[serde(default)]
+    pub relay: Option<String>,
+    /// Only used when `mode = "odoh"`. Full https:// URL of the target
+    /// resolver (`https://odoh.cloudflare-dns.com/dns-query`).
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Only used when `mode = "odoh"`. When true (the default), relay failure
+    /// returns SERVFAIL instead of downgrading to the `fallback` upstream —
+    /// a user who configured ODoH rarely wants a silent non-oblivious path.
+    #[serde(default)]
+    pub strict: Option<bool>,
+
+    /// Bootstrap IP for the relay host, used when numa is its own system
+    /// resolver (otherwise the ODoH HTTPS client loops resolving through
+    /// itself). TLS still validates the cert against `relay`'s hostname.
+    #[serde(default)]
+    pub relay_ip: Option<IpAddr>,
+
+    /// Same as `relay_ip` but for the target host.
+    #[serde(default)]
+    pub target_ip: Option<IpAddr>,
 }
 
 impl Default for UpstreamConfig {
@@ -180,7 +219,87 @@ impl Default for UpstreamConfig {
             root_hints: default_root_hints(),
             prime_tlds: default_prime_tlds(),
             srtt: default_srtt(),
+            relay: None,
+            target: None,
+            strict: None,
+            relay_ip: None,
+            target_ip: None,
         }
+    }
+}
+
+/// Parsed ODoH config fields. `mode = "odoh"` requires both URLs to be
+/// present, to parse as `https://`, and to resolve to distinct hosts.
+#[derive(Debug)]
+pub struct OdohUpstream {
+    pub relay_url: String,
+    pub relay_host: String,
+    pub target_host: String,
+    pub target_path: String,
+    pub strict: bool,
+    pub relay_bootstrap: Option<SocketAddr>,
+    pub target_bootstrap: Option<SocketAddr>,
+}
+
+impl UpstreamConfig {
+    /// Validate and extract ODoH-specific fields. Called during `load_config`
+    /// so misconfigured ODoH fails fast at startup, the same care we take
+    /// with the DNSSEC strict boot check.
+    pub fn odoh_upstream(&self) -> Result<OdohUpstream> {
+        let relay = self
+            .relay
+            .as_deref()
+            .ok_or("mode = \"odoh\" requires upstream.relay")?;
+        let target = self
+            .target
+            .as_deref()
+            .ok_or("mode = \"odoh\" requires upstream.target")?;
+
+        let relay_url = reqwest::Url::parse(relay)
+            .map_err(|e| format!("upstream.relay invalid URL '{}': {}", relay, e))?;
+        let target_url = reqwest::Url::parse(target)
+            .map_err(|e| format!("upstream.target invalid URL '{}': {}", target, e))?;
+
+        if relay_url.scheme() != "https" || target_url.scheme() != "https" {
+            return Err("upstream.relay and upstream.target must both use https://".into());
+        }
+        if relay_url.host_str().is_none() || target_url.host_str().is_none() {
+            return Err("upstream.relay and upstream.target must include a host".into());
+        }
+        if relay_url.host_str() == target_url.host_str() {
+            return Err(format!(
+                "upstream.relay and upstream.target resolve to the same host ({}); the privacy property requires distinct operators",
+                relay_url.host_str().unwrap_or("?")
+            )
+            .into());
+        }
+
+        let relay_host = relay_url
+            .host_str()
+            .ok_or("upstream.relay has no host")?
+            .to_string();
+        let target_host = target_url
+            .host_str()
+            .ok_or("upstream.target has no host")?
+            .to_string();
+        let target_path = if target_url.path().is_empty() {
+            "/".to_string()
+        } else {
+            target_url.path().to_string()
+        };
+
+        let relay_port = relay_url.port_or_known_default().unwrap_or(443);
+        let target_port = target_url.port_or_known_default().unwrap_or(443);
+
+        Ok(OdohUpstream {
+            relay_url: relay.to_string(),
+            relay_host,
+            target_host,
+            target_path,
+            strict: self.strict.unwrap_or(true),
+            relay_bootstrap: self.relay_ip.map(|ip| SocketAddr::new(ip, relay_port)),
+            target_bootstrap: self.target_ip.map(|ip| SocketAddr::new(ip, target_port)),
+        })
     }
 }
 
@@ -643,10 +762,20 @@ mod tests {
     }
 
     #[test]
-    fn fallback_parses() {
+    fn fallback_array_parses() {
         let config: Config =
             toml::from_str("[upstream]\nfallback = [\"8.8.8.8\", \"1.1.1.1\"]").unwrap();
         assert_eq!(config.upstream.fallback, vec!["8.8.8.8", "1.1.1.1"]);
+    }
+
+    #[test]
+    fn fallback_string_parses_as_singleton_vec() {
+        let config: Config =
+            toml::from_str("[upstream]\nfallback = \"tls://1.1.1.1#cloudflare-dns.com\"").unwrap();
+        assert_eq!(
+            config.upstream.fallback,
+            vec!["tls://1.1.1.1#cloudflare-dns.com"]
+        );
     }
 
     #[test]
@@ -654,6 +783,169 @@ mod tests {
         let config: Config = toml::from_str("").unwrap();
         assert!(config.upstream.address.is_empty());
         assert!(config.upstream.fallback.is_empty());
+    }
+
+    // ── [upstream] mode = "odoh" ────────────────────────────────────────
+
+    #[test]
+    fn odoh_config_parses_and_validates() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "https://odoh-relay.numa.rs/relay"
+target = "https://odoh.cloudflare-dns.com/dns-query"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(matches!(config.upstream.mode, UpstreamMode::Odoh));
+        let odoh = config.upstream.odoh_upstream().unwrap();
+        assert_eq!(odoh.relay_url, "https://odoh-relay.numa.rs/relay");
+        assert_eq!(odoh.target_host, "odoh.cloudflare-dns.com");
+        assert_eq!(odoh.target_path, "/dns-query");
+        assert!(odoh.strict, "strict defaults to true under mode=odoh");
+    }
+
+    #[test]
+    fn odoh_strict_false_is_honoured() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "https://odoh-relay.numa.rs/relay"
+target = "https://odoh.cloudflare-dns.com/dns-query"
+strict = false
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(!config.upstream.odoh_upstream().unwrap().strict);
+    }
+
+    #[test]
+    fn odoh_rejects_same_host_relay_and_target() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "https://odoh.example.com/relay"
+target = "https://odoh.example.com/dns-query"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let err = config.upstream.odoh_upstream().unwrap_err().to_string();
+        assert!(err.contains("same host"), "got: {err}");
+    }
+
+    #[test]
+    fn odoh_rejects_non_https() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "http://odoh-relay.numa.rs/relay"
+target = "https://odoh.cloudflare-dns.com/dns-query"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let err = config.upstream.odoh_upstream().unwrap_err().to_string();
+        assert!(err.contains("https"), "got: {err}");
+    }
+
+    #[test]
+    fn odoh_missing_relay_rejected() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+target = "https://odoh.cloudflare-dns.com/dns-query"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let err = config.upstream.odoh_upstream().unwrap_err().to_string();
+        assert!(err.contains("upstream.relay"), "got: {err}");
+    }
+
+    #[test]
+    fn odoh_bootstrap_ips_parse_into_socket_addrs() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "https://odoh-relay.numa.rs/relay"
+target = "https://odoh.cloudflare-dns.com/dns-query"
+relay_ip = "178.104.229.30"
+target_ip = "104.16.249.249"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let odoh = config.upstream.odoh_upstream().unwrap();
+        assert_eq!(odoh.relay_host, "odoh-relay.numa.rs");
+        assert_eq!(
+            odoh.relay_bootstrap.unwrap().to_string(),
+            "178.104.229.30:443"
+        );
+        assert_eq!(
+            odoh.target_bootstrap.unwrap().to_string(),
+            "104.16.249.249:443"
+        );
+    }
+
+    #[test]
+    fn odoh_bootstrap_ips_optional() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "https://odoh-relay.numa.rs/relay"
+target = "https://odoh.cloudflare-dns.com/dns-query"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let odoh = config.upstream.odoh_upstream().unwrap();
+        assert!(odoh.relay_bootstrap.is_none());
+        assert!(odoh.target_bootstrap.is_none());
+    }
+
+    #[test]
+    fn odoh_bootstrap_ip_rejects_garbage() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "https://odoh-relay.numa.rs/relay"
+target = "https://odoh.cloudflare-dns.com/dns-query"
+relay_ip = "not-an-ip"
+"#;
+        let err = toml::from_str::<Config>(toml).err().unwrap().to_string();
+        assert!(err.contains("relay_ip"), "got: {err}");
+    }
+
+    #[test]
+    fn odoh_bootstrap_uses_url_port_when_non_default() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "https://odoh-relay.numa.rs:8443/relay"
+target = "https://odoh.cloudflare-dns.com/dns-query"
+relay_ip = "178.104.229.30"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let odoh = config.upstream.odoh_upstream().unwrap();
+        assert_eq!(
+            odoh.relay_bootstrap.unwrap().to_string(),
+            "178.104.229.30:8443"
+        );
+    }
+
+    #[test]
+    fn hedge_delay_zeroed_for_odoh_mode() {
+        assert_eq!(
+            UpstreamMode::Odoh.hedge_delay(50),
+            Duration::ZERO,
+            "ODoH mode must zero hedge regardless of configured hedge_ms"
+        );
+        assert_eq!(
+            UpstreamMode::Forward.hedge_delay(50),
+            Duration::from_millis(50),
+            "non-ODoH modes honour configured hedge_ms"
+        );
+    }
+
+    #[test]
+    fn odoh_missing_target_rejected() {
+        let toml = r#"
+[upstream]
+mode = "odoh"
+relay = "https://odoh-relay.numa.rs/relay"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let err = config.upstream.odoh_upstream().unwrap_err().to_string();
+        assert!(err.contains("upstream.target"), "got: {err}");
     }
 
     // ── issue #82: [[forwarding]] config section ────────────────────────

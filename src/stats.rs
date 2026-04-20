@@ -102,6 +102,10 @@ pub struct ServerStats {
     transport_tcp: u64,
     transport_dot: u64,
     transport_doh: u64,
+    upstream_transport_udp: u64,
+    upstream_transport_doh: u64,
+    upstream_transport_dot: u64,
+    upstream_transport_odoh: u64,
     started_at: Instant,
 }
 
@@ -120,6 +124,31 @@ impl Transport {
             Transport::Tcp => "TCP",
             Transport::Dot => "DOT",
             Transport::Doh => "DOH",
+        }
+    }
+}
+
+/// Wire protocol used for a forwarded upstream call. Orthogonal to
+/// `QueryPath`: the path answers "where the answer came from"; this answers
+/// "over what wire we spoke to the forwarder." Callers pass
+/// `Option<UpstreamTransport>` — `None` for resolutions that never touched
+/// a forwarder (cache/local/blocked) or for recursive mode, which has its
+/// own counter via `QueryPath::Recursive`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpstreamTransport {
+    Udp,
+    Doh,
+    Dot,
+    Odoh,
+}
+
+impl UpstreamTransport {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UpstreamTransport::Udp => "UDP",
+            UpstreamTransport::Doh => "DOH",
+            UpstreamTransport::Dot => "DOT",
+            UpstreamTransport::Odoh => "ODOH",
         }
     }
 }
@@ -202,11 +231,20 @@ impl ServerStats {
             transport_tcp: 0,
             transport_dot: 0,
             transport_doh: 0,
+            upstream_transport_udp: 0,
+            upstream_transport_doh: 0,
+            upstream_transport_dot: 0,
+            upstream_transport_odoh: 0,
             started_at: Instant::now(),
         }
     }
 
-    pub fn record(&mut self, path: QueryPath, transport: Transport) -> u64 {
+    pub fn record(
+        &mut self,
+        path: QueryPath,
+        transport: Transport,
+        upstream_transport: Option<UpstreamTransport>,
+    ) -> u64 {
         self.queries_total += 1;
         match path {
             QueryPath::Local => self.queries_local += 1,
@@ -224,6 +262,14 @@ impl ServerStats {
             Transport::Tcp => self.transport_tcp += 1,
             Transport::Dot => self.transport_dot += 1,
             Transport::Doh => self.transport_doh += 1,
+        }
+        if let Some(ut) = upstream_transport {
+            match ut {
+                UpstreamTransport::Udp => self.upstream_transport_udp += 1,
+                UpstreamTransport::Doh => self.upstream_transport_doh += 1,
+                UpstreamTransport::Dot => self.upstream_transport_dot += 1,
+                UpstreamTransport::Odoh => self.upstream_transport_odoh += 1,
+            }
         }
         self.queries_total
     }
@@ -253,6 +299,10 @@ impl ServerStats {
             transport_tcp: self.transport_tcp,
             transport_dot: self.transport_dot,
             transport_doh: self.transport_doh,
+            upstream_transport_udp: self.upstream_transport_udp,
+            upstream_transport_doh: self.upstream_transport_doh,
+            upstream_transport_dot: self.upstream_transport_dot,
+            upstream_transport_odoh: self.upstream_transport_odoh,
         }
     }
 
@@ -263,7 +313,7 @@ impl ServerStats {
         let secs = uptime.as_secs() % 60;
 
         log::info!(
-            "STATS | uptime {}h{}m{}s | total {} | fwd {} | upstream {} | recursive {} | coalesced {} | cached {} | local {} | override {} | blocked {} | errors {}",
+            "STATS | uptime {}h{}m{}s | total {} | fwd {} | upstream {} | recursive {} | coalesced {} | cached {} | local {} | override {} | blocked {} | errors {} | up-udp {} | up-doh {} | up-dot {} | up-odoh {}",
             hours, mins, secs,
             self.queries_total,
             self.queries_forwarded,
@@ -275,6 +325,10 @@ impl ServerStats {
             self.queries_overridden,
             self.queries_blocked,
             self.upstream_errors,
+            self.upstream_transport_udp,
+            self.upstream_transport_doh,
+            self.upstream_transport_dot,
+            self.upstream_transport_odoh,
         );
     }
 }
@@ -295,4 +349,8 @@ pub struct StatsSnapshot {
     pub transport_tcp: u64,
     pub transport_dot: u64,
     pub transport_doh: u64,
+    pub upstream_transport_udp: u64,
+    pub upstream_transport_doh: u64,
+    pub upstream_transport_dot: u64,
+    pub upstream_transport_odoh: u64,
 }
