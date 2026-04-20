@@ -228,6 +228,7 @@ body {
 .path-bar-fill.tcp { background: var(--violet); }
 .path-bar-fill.dot { background: var(--emerald); }
 .path-bar-fill.doh { background: var(--teal); }
+.path-bar-fill.odoh { background: var(--violet-dim); }
 .path-pct {
   font-family: var(--font-mono);
   font-size: 0.75rem;
@@ -637,13 +638,23 @@ body {
     </div>
   </div>
 
-  <!-- Transport breakdown -->
+  <!-- Inbound wire (apps → numa) -->
   <div class="panel">
     <div class="panel-header">
-      <span class="panel-title">Transport</span>
+      <span class="panel-title">Inbound Wire <span style="color: var(--text-dim); font-weight: normal;">apps → numa</span></span>
       <span class="panel-title" id="transportEncrypted" style="color: var(--text-dim)"></span>
     </div>
     <div class="panel-body" id="transportBars">
+    </div>
+  </div>
+
+  <!-- Outbound wire (numa → internet) -->
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title">Outbound Wire <span style="color: var(--text-dim); font-weight: normal;">numa → internet</span></span>
+      <span class="panel-title" id="upstreamWireEncrypted" style="color: var(--text-dim)"></span>
+    </div>
+    <div class="panel-body" id="upstreamWireBars">
     </div>
   </div>
 
@@ -992,7 +1003,24 @@ function renderTransport(transport) {
   renderBarChart('transportBars', TRANSPORT_DEFS, transport, total);
   const encPct = encryptionPct(transport);
   const el = document.getElementById('transportEncrypted');
-  el.textContent = `${encPct}% encrypted`;
+  el.textContent = `${encPct}% encrypted inbound`;
+  el.style.color = encPct >= 80 ? 'var(--emerald)' : encPct >= 50 ? 'var(--amber)' : 'var(--rose)';
+}
+
+const UPSTREAM_WIRE_DEFS = [
+  { key: 'udp',  label: 'UDP',  cls: 'udp' },
+  { key: 'doh',  label: 'DoH',  cls: 'doh' },
+  { key: 'dot',  label: 'DoT',  cls: 'dot' },
+  { key: 'odoh', label: 'ODoH', cls: 'odoh' },
+];
+
+function renderUpstreamWire(ut) {
+  const total = (ut.udp + ut.doh + ut.dot + ut.odoh) || 0;
+  renderBarChart('upstreamWireBars', UPSTREAM_WIRE_DEFS, ut, total || 1);
+  const encrypted = ut.doh + ut.dot + ut.odoh;
+  const encPct = total > 0 ? Math.round((encrypted / total) * 100) : 0;
+  const el = document.getElementById('upstreamWireEncrypted');
+  el.textContent = total > 0 ? `${encPct}% encrypted outbound` : '';
   el.style.color = encPct >= 80 ? 'var(--emerald)' : encPct >= 50 ? 'var(--amber)' : 'var(--rose)';
 }
 
@@ -1234,6 +1262,7 @@ async function refresh() {
     // Panels
     renderPaths(q);
     renderTransport(stats.transport);
+    renderUpstreamWire(stats.upstream_transport || { udp: 0, doh: 0, dot: 0, odoh: 0 });
     renderQueryLog(logs);
     renderOverrides(overrides);
     renderCache(cache);
