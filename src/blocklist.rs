@@ -437,11 +437,11 @@ mod retry_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    async fn flaky_http_server(fail_first: usize, body: &'static str) -> SocketAddr {
+    async fn flaky_http_server(drop_first_n: usize, body: &'static str) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            for _ in 0..fail_first {
+            for _ in 0..drop_first_n {
                 if let Ok((sock, _)) = listener.accept().await {
                     drop(sock);
                 }
@@ -466,22 +466,28 @@ mod retry_tests {
         addr
     }
 
+    fn zero_delays() -> Vec<u64> {
+        vec![0; RETRY_DELAYS_SECS.len()]
+    }
+
     #[tokio::test]
-    async fn retry_succeeds_after_transient_failure() {
+    async fn retry_succeeds_on_final_attempt() {
         let body = "ads.example.com\ntracker.example.net\n";
-        let addr = flaky_http_server(2, body).await;
+        let delays = zero_delays();
+        let addr = flaky_http_server(delays.len(), body).await;
         let client = reqwest::Client::new();
         let url = format!("http://{addr}/");
-        let result = fetch_with_retry_delays(&client, &url, &[0, 0, 0]).await;
+        let result = fetch_with_retry_delays(&client, &url, &delays).await;
         assert_eq!(result.as_deref(), Some(body));
     }
 
     #[tokio::test]
     async fn retry_gives_up_when_all_attempts_fail() {
-        let addr = flaky_http_server(10, "").await;
+        let delays = zero_delays();
+        let addr = flaky_http_server(delays.len() + 2, "unreachable").await;
         let client = reqwest::Client::new();
         let url = format!("http://{addr}/");
-        let result = fetch_with_retry_delays(&client, &url, &[0, 0, 0]).await;
+        let result = fetch_with_retry_delays(&client, &url, &delays).await;
         assert_eq!(result, None);
     }
 }
