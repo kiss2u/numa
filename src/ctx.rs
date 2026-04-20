@@ -105,6 +105,7 @@ pub async fn resolve_query(
     // Pipeline: overrides -> .localhost -> local zones -> special-use (unless forwarded)
     //        -> .tld proxy -> blocklist -> cache -> forwarding -> recursive/upstream
     // Each lock is scoped to avoid holding MutexGuard across await points.
+    let mut upstream_transport: Option<crate::stats::UpstreamTransport> = None;
     let (response, path, dnssec) = {
         let override_record = ctx.overrides.read().unwrap().lookup(&qname);
         if let Some(record) = override_record {
@@ -208,6 +209,7 @@ pub async fn resolve_query(
             {
                 // Conditional forwarding takes priority over recursive mode
                 // (e.g. Tailscale .ts.net, VPC private zones)
+                upstream_transport = pool.preferred().map(|u| u.transport());
                 match forward_with_failover_raw(
                     raw_wire,
                     pool,
@@ -241,6 +243,9 @@ pub async fn resolve_query(
                     }
                 }
             } else if ctx.upstream_mode == UpstreamMode::Recursive {
+                // Recursive resolution makes UDP hops to roots/TLDs/auths;
+                // tag as Udp so the dashboard can aggregate plaintext-wire
+                // egress honestly. Only mark on success — errors stay None.
                 let key = (qname.clone(), qtype);
                 let (resp, path, err) = resolve_coalesced(&ctx.inflight, key, &query, || {
                     crate::recursive::resolve_recursive(
@@ -263,6 +268,8 @@ pub async fn resolve_query(
                         qname,
                         err.as_deref().unwrap_or("leader failed")
                     );
+                } else {
+                    upstream_transport = Some(crate::stats::UpstreamTransport::Udp);
                 }
                 (resp, path, DnssecStatus::Indeterminate)
             } else {
@@ -277,7 +284,10 @@ pub async fn resolve_query(
                 .await
                 {
                     Ok(resp_wire) => match cache_and_parse(ctx, &qname, qtype, &resp_wire) {
-                        Ok(resp) => (resp, QueryPath::Upstream, DnssecStatus::Indeterminate),
+                        Ok(resp) => {
+                            upstream_transport = pool.preferred().map(|u| u.transport());
+                            (resp, QueryPath::Upstream, DnssecStatus::Indeterminate)
+                        }
                         Err(e) => {
                             error!("{} | {:?} {} | PARSE ERROR | {}", src_addr, qtype, qname, e);
                             (
@@ -397,7 +407,7 @@ pub async fn resolve_query(
     // Record stats and query log
     {
         let mut s = ctx.stats.lock().unwrap();
-        let total = s.record(path, transport);
+        let total = s.record(path, transport, upstream_transport);
         if total.is_multiple_of(1000) {
             s.log_summary();
         }

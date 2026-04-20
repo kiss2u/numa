@@ -60,6 +60,22 @@ fn main() -> numa::Result<()> {
                 .block_on(numa::setup_phone::run())
                 .map_err(|e| e.into());
         }
+        "relay" => {
+            let port: u16 = std::env::args()
+                .nth(2)
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8443);
+            let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+            eprintln!(
+                "\x1b[1;38;2;192;98;58mNuma\x1b[0m — ODoH relay on {}\n",
+                addr
+            );
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            return runtime.block_on(numa::relay::run(addr));
+        }
         "lan" => {
             let sub = std::env::args().nth(2).unwrap_or_default();
             let config_path = std::env::args()
@@ -91,6 +107,7 @@ fn main() -> numa::Result<()> {
             eprintln!("  service status  Check if the service is running");
             eprintln!("  lan on          Enable LAN service discovery (mDNS)");
             eprintln!("  lan off         Disable LAN service discovery");
+            eprintln!("  relay [PORT]    Run as an ODoH relay (RFC 9230, default port 8443)");
             eprintln!("  setup-phone     Generate a QR code to install Numa DoT on a phone");
             eprintln!("  help            Show this help");
             eprintln!();
