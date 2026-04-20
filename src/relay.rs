@@ -20,9 +20,8 @@ use serde::Deserialize;
 use tokio::net::TcpListener;
 
 use crate::forward::build_https_client_with_pool;
+use crate::odoh::ODOH_CONTENT_TYPE;
 use crate::Result;
-
-const ODOH_CONTENT_TYPE: &str = "application/oblivious-dns-message";
 
 /// Cap on the opaque body we accept from a client. ODoH envelopes are
 /// ~100–300 bytes in practice; anything larger is malformed or hostile.
@@ -55,23 +54,30 @@ struct RelayState {
     rejected_bad_request: AtomicU64,
 }
 
-pub async fn run(addr: SocketAddr) -> Result<()> {
-    let state = Arc::new(RelayState {
-        client: build_https_client_with_pool(RELAY_POOL_PER_HOST),
-        total_requests: AtomicU64::new(0),
-        forwarded_ok: AtomicU64::new(0),
-        forwarded_err: AtomicU64::new(0),
-        rejected_bad_request: AtomicU64::new(0),
-    });
+impl RelayState {
+    fn new() -> Arc<Self> {
+        Arc::new(RelayState {
+            client: build_https_client_with_pool(RELAY_POOL_PER_HOST),
+            total_requests: AtomicU64::new(0),
+            forwarded_ok: AtomicU64::new(0),
+            forwarded_err: AtomicU64::new(0),
+            rejected_bad_request: AtomicU64::new(0),
+        })
+    }
+}
 
-    let app = Router::new()
+/// `DefaultBodyLimit` overrides axum's 2 MiB default so hostile clients
+/// can't force the relay to buffer multi-MB bodies before our own cap.
+fn build_app(state: Arc<RelayState>) -> Router {
+    Router::new()
         .route("/relay", post(handle_relay))
-        // Overrides axum's default (2 MiB) so hostile clients can't force
-        // the relay to buffer multi-MB bodies before our own cap check.
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .route("/health", get(handle_health))
-        .with_state(state);
+        .with_state(state)
+}
 
+pub async fn run(addr: SocketAddr) -> Result<()> {
+    let app = build_app(RelayState::new());
     let listener = TcpListener::bind(addr).await?;
     info!("ODoH relay listening on {}", addr);
     axum::serve(listener, app).await?;
@@ -199,19 +205,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let state = Arc::new(RelayState {
-            client: build_https_client_with_pool(RELAY_POOL_PER_HOST),
-            total_requests: AtomicU64::new(0),
-            forwarded_ok: AtomicU64::new(0),
-            forwarded_err: AtomicU64::new(0),
-            rejected_bad_request: AtomicU64::new(0),
-        });
-
-        let app = Router::new()
-            .route("/relay", post(handle_relay))
-            .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-            .route("/health", get(handle_health))
-            .with_state(state.clone());
+        let state = RelayState::new();
+        let app = build_app(state.clone());
 
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;

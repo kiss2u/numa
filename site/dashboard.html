@@ -971,9 +971,11 @@ function renderBarChart(containerId, defs, data, total) {
     }).join('');
 }
 
-function encryptionPct(transport) {
-  const total = (transport.udp + transport.tcp + transport.dot + transport.doh) || 1;
-  return (((transport.dot + transport.doh) / total) * 100).toFixed(0);
+function encryptionPct(data, encryptedKeys, allKeys) {
+  const total = allKeys.reduce((s, k) => s + (data[k] || 0), 0);
+  if (total === 0) return 0;
+  const encrypted = encryptedKeys.reduce((s, k) => s + (data[k] || 0), 0);
+  return Math.round((encrypted / total) * 100);
 }
 
 const PATH_DEFS = [
@@ -1001,7 +1003,7 @@ const TRANSPORT_DEFS = [
 function renderTransport(transport) {
   const total = (transport.udp + transport.tcp + transport.dot + transport.doh) || 1;
   renderBarChart('transportBars', TRANSPORT_DEFS, transport, total);
-  const encPct = encryptionPct(transport);
+  const encPct = encryptionPct(transport, ['dot', 'doh'], ['udp', 'tcp', 'dot', 'doh']);
   const el = document.getElementById('transportEncrypted');
   el.textContent = `${encPct}% encrypted inbound`;
   el.style.color = encPct >= 80 ? 'var(--emerald)' : encPct >= 50 ? 'var(--amber)' : 'var(--rose)';
@@ -1017,8 +1019,7 @@ const UPSTREAM_WIRE_DEFS = [
 function renderUpstreamWire(ut) {
   const total = (ut.udp + ut.doh + ut.dot + ut.odoh) || 0;
   renderBarChart('upstreamWireBars', UPSTREAM_WIRE_DEFS, ut, total || 1);
-  const encrypted = ut.doh + ut.dot + ut.odoh;
-  const encPct = total > 0 ? Math.round((encrypted / total) * 100) : 0;
+  const encPct = encryptionPct(ut, ['doh', 'dot', 'odoh'], ['udp', 'doh', 'dot', 'odoh']);
   const el = document.getElementById('upstreamWireEncrypted');
   el.textContent = total > 0 ? `${encPct}% encrypted outbound` : '';
   el.style.color = encPct >= 80 ? 'var(--emerald)' : encPct >= 50 ? 'var(--amber)' : 'var(--rose)';

@@ -25,7 +25,7 @@ use tokio::time::timeout;
 use crate::Result;
 
 /// MIME type used for both directions of the ODoH exchange (RFC 9230 §4).
-const ODOH_CONTENT_TYPE: &str = "application/oblivious-dns-message";
+pub(crate) const ODOH_CONTENT_TYPE: &str = "application/oblivious-dns-message";
 
 /// Cap on the response body we read into memory when the relay returns
 /// non-success. Protects against a hostile relay streaming a huge body on
