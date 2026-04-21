@@ -70,6 +70,17 @@ impl NumaResolver {
             ips.join(", "),
             source
         );
+        if !overrides.is_empty() {
+            let mut pairs: Vec<String> = overrides
+                .iter()
+                .flat_map(|(host, ips)| ips.iter().map(move |ip| format!("{}={}", host, ip)))
+                .collect();
+            pairs.sort();
+            info!(
+                "bootstrap resolver: host overrides (skip DNS, connect direct): {}",
+                pairs.join(", ")
+            );
+        }
         Self {
             bootstrap,
             overrides,
