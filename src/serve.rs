@@ -18,7 +18,9 @@ use crate::buffer::BytePacketBuffer;
 use crate::cache::DnsCache;
 use crate::config::{build_zone_map, load_config, ConfigLoad};
 use crate::ctx::{handle_query, ServerCtx};
-use crate::forward::{build_https_client_with_resolver, parse_upstream_list, Upstream, UpstreamPool};
+use crate::forward::{
+    build_https_client_with_resolver, parse_upstream_list, Upstream, UpstreamPool,
+};
 use crate::odoh::OdohConfigCache;
 use crate::override_store::OverrideStore;
 use crate::query_log::QueryLog;
@@ -625,11 +627,7 @@ async fn network_watch_loop(ctx: Arc<ServerCtx>) {
     }
 }
 
-async fn load_blocklists(
-    ctx: &ServerCtx,
-    lists: &[String],
-    resolver: Option<Arc<NumaResolver>>,
-) {
+async fn load_blocklists(ctx: &ServerCtx, lists: &[String], resolver: Option<Arc<NumaResolver>>) {
     let downloaded = download_blocklists(lists, resolver).await;
 
     // Parse outside the lock to avoid blocking DNS queries during parse (~100ms)

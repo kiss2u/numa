@@ -210,12 +210,8 @@ pub async fn resolve_query(
                 // Conditional forwarding takes priority over recursive mode
                 // (e.g. Tailscale .ts.net, VPC private zones)
                 let key = (qname.clone(), qtype);
-                let (resp, path, err) = resolve_coalesced(
-                    &ctx.inflight,
-                    key,
-                    &query,
-                    QueryPath::Forwarded,
-                    || async {
+                let (resp, path, err) =
+                    resolve_coalesced(&ctx.inflight, key, &query, QueryPath::Forwarded, || async {
                         let wire = forward_with_failover_raw(
                             raw_wire,
                             pool,
@@ -225,9 +221,8 @@ pub async fn resolve_query(
                         )
                         .await?;
                         cache_and_parse(ctx, &qname, qtype, &wire)
-                    },
-                )
-                .await;
+                    })
+                    .await;
                 log_coalesced_outcome(src_addr, qtype, &qname, path, err.as_deref(), "FORWARD");
                 if path == QueryPath::Forwarded {
                     upstream_transport = pool.preferred().map(|u| u.transport());
@@ -238,12 +233,8 @@ pub async fn resolve_query(
                 // tag as Udp so the dashboard can aggregate plaintext-wire
                 // egress honestly. Only mark on success — errors stay None.
                 let key = (qname.clone(), qtype);
-                let (resp, path, err) = resolve_coalesced(
-                    &ctx.inflight,
-                    key,
-                    &query,
-                    QueryPath::Recursive,
-                    || {
+                let (resp, path, err) =
+                    resolve_coalesced(&ctx.inflight, key, &query, QueryPath::Recursive, || {
                         crate::recursive::resolve_recursive(
                             &qname,
                             qtype,
@@ -252,9 +243,8 @@ pub async fn resolve_query(
                             &ctx.root_hints,
                             &ctx.srtt,
                         )
-                    },
-                )
-                .await;
+                    })
+                    .await;
                 log_coalesced_outcome(src_addr, qtype, &qname, path, err.as_deref(), "RECURSIVE");
                 if path == QueryPath::Recursive {
                     upstream_transport = Some(crate::stats::UpstreamTransport::Udp);
@@ -263,12 +253,8 @@ pub async fn resolve_query(
             } else {
                 let pool = ctx.upstream_pool.lock().unwrap().clone();
                 let key = (qname.clone(), qtype);
-                let (resp, path, err) = resolve_coalesced(
-                    &ctx.inflight,
-                    key,
-                    &query,
-                    QueryPath::Upstream,
-                    || async {
+                let (resp, path, err) =
+                    resolve_coalesced(&ctx.inflight, key, &query, QueryPath::Upstream, || async {
                         let wire = forward_with_failover_raw(
                             raw_wire,
                             &pool,
@@ -278,9 +264,8 @@ pub async fn resolve_query(
                         )
                         .await?;
                         cache_and_parse(ctx, &qname, qtype, &wire)
-                    },
-                )
-                .await;
+                    })
+                    .await;
                 log_coalesced_outcome(src_addr, qtype, &qname, path, err.as_deref(), "UPSTREAM");
                 if path == QueryPath::Upstream {
                     upstream_transport = pool.preferred().map(|u| u.transport());

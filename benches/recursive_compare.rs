@@ -610,8 +610,10 @@ fn run_hedge_multi(rt: &tokio::runtime::Runtime, iterations: usize) {
     );
 
     let primary = numa::forward::parse_upstream(DOH_UPSTREAM, 443, None).expect("failed to parse");
-    let primary_dual = numa::forward::parse_upstream(DOH_UPSTREAM, 443, None).expect("failed to parse");
-    let secondary_dual = numa::forward::parse_upstream(DOH_UPSTREAM, 443, None).expect("failed to parse");
+    let primary_dual =
+        numa::forward::parse_upstream(DOH_UPSTREAM, 443, None).expect("failed to parse");
+    let secondary_dual =
+        numa::forward::parse_upstream(DOH_UPSTREAM, 443, None).expect("failed to parse");
     let resolver = rt.block_on(build_hickory_resolver());
 
     println!("Warming up...");

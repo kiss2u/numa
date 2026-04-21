@@ -87,15 +87,12 @@ impl Resolve for NumaResolver {
         let hostname = name.as_str().to_string();
 
         if let Some(ips) = self.overrides.get(&hostname) {
-            let addrs: Vec<SocketAddr> =
-                ips.iter().map(|ip| SocketAddr::new(*ip, 0)).collect();
+            let addrs: Vec<SocketAddr> = ips.iter().map(|ip| SocketAddr::new(*ip, 0)).collect();
             debug!(
                 "bootstrap_resolver: override hit for {} → {:?}",
                 hostname, ips
             );
-            return Box::pin(
-                async move { Ok(Box::new(addrs.into_iter()) as Addrs) },
-            );
+            return Box::pin(async move { Ok(Box::new(addrs.into_iter()) as Addrs) });
         }
 
         let bootstrap = self.bootstrap.clone();
@@ -144,7 +141,10 @@ async fn resolve_via_bootstrap(
         .into())
 }
 
-async fn query_with_tcp_fallback(query: &DnsPacket, server: SocketAddr) -> crate::Result<DnsPacket> {
+async fn query_with_tcp_fallback(
+    query: &DnsPacket,
+    server: SocketAddr,
+) -> crate::Result<DnsPacket> {
     match forward_udp(query, server, UDP_TIMEOUT).await {
         Ok(pkt) => Ok(pkt),
         Err(e) => {
