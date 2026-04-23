@@ -43,7 +43,7 @@ api_port = 5380
 # refuses same-operator relay+target configs by default (eTLD+1 check).
 # [upstream]
 # mode = "odoh"
-# relay = "https://odoh-relay.numa.rs/proxy"
+# relay = "https://odoh-relay.numa.rs/relay"
 # target = "https://odoh.cloudflare-dns.com/dns-query"
 # strict = true                                 # default: refuse to downgrade to `fallback`
 #                                                # on relay failure. Set false to allow a
