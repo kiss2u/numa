@@ -175,8 +175,7 @@ pub fn parse_upstream(
 ///
 /// Uses the system resolver. Callers running inside `serve::run` pass the
 /// shared [`crate::bootstrap_resolver::NumaResolver`] via
-/// [`build_https_client_with_resolver`] to avoid the self-loop documented
-/// in `docs/implementation/bootstrap-resolver.md`.
+/// [`build_https_client_with_resolver`] to avoid the self-loop (issue #122).
 pub fn build_https_client() -> reqwest::Client {
     build_https_client_with_resolver(1, None)
 }

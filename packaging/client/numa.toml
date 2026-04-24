@@ -1,7 +1,7 @@
 # Numa — ODoH client mode (docker-compose starter).
 # Sends every DNS query through an independent relay + target pair so
 # neither operator sees both your IP and your question. See
-# docs/implementation/odoh-integration.md for the protocol details and
+# recipes/odoh-upstream.md for the protocol details and
 # packaging/client/README.md for deploy notes.
 
 [server]
