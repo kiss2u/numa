@@ -2,8 +2,7 @@
 //! relay/target, blocklist CDN). When numa is its own system resolver
 //! (`/etc/resolv.conf → 127.0.0.1`, HAOS add-on, Pi-hole-style container),
 //! the default `getaddrinfo` path loops back through numa before numa can
-//! answer — a chicken-and-egg that deadlocks cold boot. See issue #122 and
-//! `docs/implementation/bootstrap-resolver.md`.
+//! answer — a chicken-and-egg that deadlocks cold boot. See issue #122.
 //!
 //! Resolution order per hostname:
 //! 1. Per-hostname overrides (e.g. ODoH `relay_ip` / `target_ip`) → return

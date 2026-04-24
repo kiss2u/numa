@@ -2,10 +2,10 @@
 
 Single-container deploy that runs Numa as an ODoH (RFC 9230) client: every
 DNS query routes through an independent relay + target so neither operator
-sees both your IP and your question. See the [ODoH integration doc][odoh]
-for the full protocol and privacy trade-offs.
+sees both your IP and your question. See the [ODoH upstream recipe][odoh]
+for the protocol details and the bootstrap-pinning trade-offs.
 
-[odoh]: ../../docs/implementation/odoh-integration.md
+[odoh]: ../../recipes/odoh-upstream.md
 
 ## Prerequisites
 

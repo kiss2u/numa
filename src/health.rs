@@ -7,11 +7,10 @@
 //! Both handlers call [`HealthResponse::build`] to assemble the JSON
 //! response from `HealthMeta` + live inputs.
 //!
-//! JSON schema is documented in `docs/implementation/ios-companion-app.md`
-//! §4.2. The iOS companion app's `HealthInfo` struct is the canonical
-//! consumer; any change to this response must keep that struct decoding
-//! cleanly (all consumed fields are optional on the Swift side, but
-//! `lan_ip` is load-bearing for the pipeline).
+//! The iOS companion app's `HealthInfo` struct is the canonical consumer;
+//! any change to this response must keep that struct decoding cleanly (all
+//! consumed fields are optional on the Swift side, but `lan_ip` is
+//! load-bearing for the pipeline).
 
 use std::net::Ipv4Addr;
 use std::path::Path;

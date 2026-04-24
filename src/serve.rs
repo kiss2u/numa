@@ -52,7 +52,6 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     // Routes numa-originated HTTPS (DoH upstream, ODoH relay/target, blocklist
     // CDN) away from the system resolver so lookups don't loop back through
     // numa when it's its own system DNS.
-    // See `docs/implementation/bootstrap-resolver.md`.
     let resolver_overrides = match config.upstream.mode {
         crate::config::UpstreamMode::Odoh => config
             .upstream
