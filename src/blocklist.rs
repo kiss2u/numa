@@ -217,10 +217,7 @@ pub fn parse_blocklist(text: &str) -> HashSet<String> {
             continue;
         }
 
-        if line.starts_with("0.0.0.0")
-            || line.starts_with("127.0.0.1")
-            || line.starts_with("::")
-        {
+        if line.starts_with("0.0.0.0") || line.starts_with("127.0.0.1") || line.starts_with("::") {
             // Hosts format: an IP followed by one or more whitespace-separated
             // aliases. BSD hosts(5) has always allowed multiple names per IP,
             // and several published lists rely on it for size. Inline `# ...`
@@ -367,8 +364,7 @@ mod tests {
 
     #[test]
     fn excludes_localhost_aliases_in_hosts_line() {
-        let domains =
-            parse_blocklist("127.0.0.1 localhost localhost.localdomain my.local.dev\n");
+        let domains = parse_blocklist("127.0.0.1 localhost localhost.localdomain my.local.dev\n");
         assert_eq!(domains.len(), 1);
         assert!(domains.contains("my.local.dev"));
     }
