@@ -482,7 +482,11 @@ foreach ($a in $adapters) {
     $v6 = @(Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue).ServerAddresses
     $iface = Get-NetIPInterface -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
     $dhcp = if ($iface) { $iface.Dhcp -eq 'Enabled' } else { $false }
-    $result[$a.Name] = @{ dhcp = $dhcp; servers = @($v4 + $v6) }
+    # Drop nulls: ServerAddresses can be $null when an adapter has no
+    # configured DNS for one family, and `$v4 + $null` appends a literal
+    # null entry that ConvertTo-Json emits as JSON `null`, breaking the
+    # `Vec<String>` deserialize on the Rust side.
+    $result[$a.Name] = @{ dhcp = $dhcp; servers = @(($v4 + $v6) | Where-Object { $_ }) }
 }
 $result | ConvertTo-Json -Compress -Depth 4
 "#;
@@ -2027,6 +2031,15 @@ mod tests {
     #[test]
     fn parse_powershell_rejects_garbage() {
         assert!(parse_powershell_interfaces("not json").is_err());
+    }
+
+    #[test]
+    fn parse_powershell_rejects_null_server_entry() {
+        // Locks in the PS-side null filter (Where-Object { $_ }) — a real
+        // install on a dual-stack adapter without IPv6 DNS used to emit
+        // `["10.0.0.1", null]`, failing deserialize at install time.
+        let sample = r#"{"Wi-Fi":{"dhcp":true,"servers":["1.1.1.1",null]}}"#;
+        assert!(parse_powershell_interfaces(sample).is_err());
     }
 
     #[test]
