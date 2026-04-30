@@ -397,6 +397,26 @@ check "Non-local domain still resolves" \
     "$($DIG example.com A +short)"
 
 echo ""
+echo "=== DNS-over-TCP listener (RFC 1035 §4.2.2 / RFC 7766) ==="
+
+check "Local A over TCP (test.local)" \
+    "10.0.0.1" \
+    "$($DIG test.local A +tcp +short)"
+
+check "Local MX over TCP (mail.local)" \
+    "smtp.local" \
+    "$($DIG mail.local MX +tcp +short)"
+
+# Verifies the connection is tagged Transport::Tcp end-to-end (not just
+# that it resolved). transport.tcp lives inside the transport object.
+TCP_COUNT=$(curl -sf http://127.0.0.1:$API_PORT/stats 2>/dev/null \
+    | grep -o '"transport":{[^}]*}' \
+    | grep -o '"tcp":[0-9]*' | cut -d: -f2)
+check "transport.tcp counter > 0 after TCP queries" \
+    "[1-9]" \
+    "${TCP_COUNT:-0}"
+
+echo ""
 echo "=== Overrides API ==="
 
 # Create override
