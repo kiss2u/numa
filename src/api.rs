@@ -181,7 +181,17 @@ struct StatsResponse {
     blocking: BlockingStatsResponse,
     lan: LanStatsResponse,
     mobile: MobileStatsResponse,
+    proxy_protocol: ProxyProtocolStats,
     memory: MemoryStats,
+}
+
+#[derive(Serialize)]
+struct ProxyProtocolStats {
+    accepted: u64,
+    rejected_untrusted: u64,
+    rejected_signature: u64,
+    local_command: u64,
+    timeout: u64,
 }
 
 #[derive(Serialize)]
@@ -606,6 +616,13 @@ async fn stats(State(ctx): State<Arc<ServerCtx>>) -> Json<StatsResponse> {
         mobile: MobileStatsResponse {
             enabled: ctx.mobile_enabled,
             port: ctx.mobile_port,
+        },
+        proxy_protocol: ProxyProtocolStats {
+            accepted: snap.proxy_v2_accepted,
+            rejected_untrusted: snap.proxy_v2_rejected_untrusted,
+            rejected_signature: snap.proxy_v2_rejected_signature,
+            local_command: snap.proxy_v2_local_command,
+            timeout: snap.proxy_v2_timeout,
         },
         memory: MemoryStats {
             cache_bytes,
