@@ -73,19 +73,24 @@ async fn accept_loop(listener: TcpListener, ctx: Arc<ServerCtx>) {
 
         tokio::spawn(async move {
             let _permit = permit;
-            handle_tcp_connection(stream, peer, &ctx).await;
+            handle_framed_dns_connection(stream, peer, &ctx, Transport::Tcp).await;
         });
     }
 }
 
-/// Handle a single persistent TCP connection (RFC 7766 §6.2.1).
-/// Reads length-prefixed DNS queries until EOF, idle timeout, or error.
-async fn handle_tcp_connection<S>(mut stream: S, remote_addr: SocketAddr, ctx: &Arc<ServerCtx>)
-where
+/// Drive a length-prefixed DNS-over-stream connection (RFC 1035 §4.2.2,
+/// RFC 7766 §6.2.1). Shared between plain TCP and DoT — DoT calls in after
+/// TLS termination with `Transport::Dot`.
+pub(crate) async fn handle_framed_dns_connection<S>(
+    mut stream: S,
+    remote_addr: SocketAddr,
+    ctx: &Arc<ServerCtx>,
+    transport: Transport,
+) where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
+    let proto = transport.as_str();
     loop {
-        // Read 2-byte length prefix (RFC 1035 §4.2.2) with idle timeout.
         let mut len_buf = [0u8; 2];
         let Ok(Ok(_)) = tokio::time::timeout(IDLE_TIMEOUT, stream.read_exact(&mut len_buf)).await
         else {
@@ -93,7 +98,10 @@ where
         };
         let msg_len = u16::from_be_bytes(len_buf) as usize;
         if msg_len > MAX_MSG_LEN {
-            debug!("TCP: oversized message {} from {}", msg_len, remote_addr);
+            debug!(
+                "{}: oversized message {} from {}",
+                proto, msg_len, remote_addr
+            );
             break;
         }
 
@@ -108,12 +116,14 @@ where
             Ok(q) => q,
             Err(e) => {
                 warn!("{} | PARSE ERROR | {}", remote_addr, e);
+                // BytePacketBuffer is zero-initialized, so buf[0..2] reads as
+                // 0x0000 for sub-2-byte messages — harmless FORMERR with id=0.
                 let query_id = u16::from_be_bytes([buffer.buf[0], buffer.buf[1]]);
                 let mut resp = DnsPacket::new();
                 resp.header.id = query_id;
                 resp.header.response = true;
                 resp.header.rescode = ResultCode::FORMERR;
-                if send_response(&mut stream, &resp, remote_addr)
+                if send_response(&mut stream, &resp, remote_addr, proto)
                     .await
                     .is_err()
                 {
@@ -128,7 +138,7 @@ where
             &buffer.buf[..msg_len],
             remote_addr,
             ctx,
-            Transport::Tcp,
+            transport,
         )
         .await
         {
@@ -143,7 +153,7 @@ where
             Err(e) => {
                 warn!("{} | RESOLVE ERROR | {}", remote_addr, e);
                 let resp = DnsPacket::response_from(&query, ResultCode::SERVFAIL);
-                if send_response(&mut stream, &resp, remote_addr)
+                if send_response(&mut stream, &resp, remote_addr, proto)
                     .await
                     .is_err()
                 {
@@ -158,6 +168,7 @@ async fn send_response<S>(
     stream: &mut S,
     resp: &DnsPacket,
     remote_addr: SocketAddr,
+    proto: &str,
 ) -> std::io::Result<()>
 where
     S: AsyncWriteExt + Unpin,
@@ -165,8 +176,8 @@ where
     let mut out_buf = BytePacketBuffer::new();
     if resp.write(&mut out_buf).is_err() {
         debug!(
-            "TCP: failed to serialize {:?} response for {}",
-            resp.header.rescode, remote_addr
+            "{}: failed to serialize {:?} response for {}",
+            proto, resp.header.rescode, remote_addr
         );
         return Err(std::io::Error::other("serialize failed"));
     }
