@@ -1,12 +1,6 @@
-//! Plain DNS-over-TCP listener (RFC 1035 §4.2.2, RFC 7766).
-//!
-//! TCP support is not optional: when a UDP response exceeds the client's
-//! advertised buffer (or 512 bytes without EDNS0), numa sets the TC bit and
-//! a compliant client retries the same query over TCP on the same `bind_addr`.
-//! Without this listener, those retries silently fail.
-//!
-//! Connection model mirrors `dot.rs`: bounded concurrency, per-connection
-//! idle timeout, length-prefixed framing, FORMERR for parse errors.
+//! Plain DNS-over-TCP listener (RFC 1035 §4.2.2, RFC 7766). Required so
+//! clients can retry after a TC=1 truncated UDP response — without it, those
+//! retries hit a closed port. Connection model mirrors `dot.rs`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

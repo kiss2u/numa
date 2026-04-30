@@ -557,10 +557,7 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         });
     }
 
-    // Spawn DNS-over-TCP listener (RFC 1035 §4.2.2 / RFC 7766) on the same
-    // address as UDP. Required so clients can retry after a TC=1 truncated
-    // UDP response, and for queries that don't fit a UDP datagram in the
-    // first place (DNSSEC chains, large TXT, ANY).
+    // Spawn DNS-over-TCP listener (RFC 1035 / RFC 7766)
     {
         let tcp_ctx = Arc::clone(&ctx);
         let tcp_bind = config.server.bind_addr.clone();
