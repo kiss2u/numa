@@ -557,6 +557,15 @@ pub async fn run(config_path: String) -> crate::Result<()> {
         });
     }
 
+    // Spawn DNS-over-TCP listener (RFC 1035 / RFC 7766)
+    {
+        let tcp_ctx = Arc::clone(&ctx);
+        let tcp_bind = config.server.bind_addr.clone();
+        tokio::spawn(async move {
+            crate::tcp::start_tcp(tcp_ctx, &tcp_bind).await;
+        });
+    }
+
     // UDP DNS listener
     #[allow(clippy::infinite_loop)]
     loop {

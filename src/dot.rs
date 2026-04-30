@@ -5,25 +5,17 @@ use std::time::Duration;
 
 use log::{debug, error, info, warn};
 use rustls::ServerConfig;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
 
-use crate::buffer::BytePacketBuffer;
 use crate::config::DotConfig;
-use crate::ctx::{resolve_query, ServerCtx};
-use crate::header::ResultCode;
-use crate::packet::DnsPacket;
+use crate::ctx::ServerCtx;
 use crate::stats::Transport;
+use crate::tcp::handle_framed_dns_connection;
 
 const MAX_CONNECTIONS: usize = 512;
-const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
-// Matches BytePacketBuffer::BUF_SIZE — RFC 7858 allows up to 65535 but our
-// buffer would silently truncate anything larger.
-const MAX_MSG_LEN: usize = 4096;
 
 fn dot_alpn() -> Vec<Vec<u8>> {
     vec![b"dot".to_vec()]
@@ -147,131 +139,8 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, ctx: Arc<Serv
                     }
                 };
 
-            handle_dot_connection(tls_stream, remote_addr, &ctx).await;
+            handle_framed_dns_connection(tls_stream, remote_addr, &ctx, Transport::Dot).await;
         });
-    }
-}
-
-/// Handle a single persistent DoT connection (RFC 7858).
-/// Reads length-prefixed DNS queries until EOF, idle timeout, or error.
-async fn handle_dot_connection<S>(
-    mut stream: S,
-    remote_addr: SocketAddr,
-    ctx: &std::sync::Arc<ServerCtx>,
-) where
-    S: AsyncReadExt + AsyncWriteExt + Unpin,
-{
-    loop {
-        // Read 2-byte length prefix (RFC 1035 §4.2.2) with idle timeout
-        let mut len_buf = [0u8; 2];
-        let Ok(Ok(_)) = tokio::time::timeout(IDLE_TIMEOUT, stream.read_exact(&mut len_buf)).await
-        else {
-            break;
-        };
-        let msg_len = u16::from_be_bytes(len_buf) as usize;
-        if msg_len > MAX_MSG_LEN {
-            debug!("DoT: oversized message {} from {}", msg_len, remote_addr);
-            break;
-        }
-
-        let mut buffer = BytePacketBuffer::new();
-        let Ok(Ok(_)) =
-            tokio::time::timeout(IDLE_TIMEOUT, stream.read_exact(&mut buffer.buf[..msg_len])).await
-        else {
-            break;
-        };
-
-        let query = match DnsPacket::from_buffer(&mut buffer) {
-            Ok(q) => q,
-            Err(e) => {
-                warn!("{} | PARSE ERROR | {}", remote_addr, e);
-                // BytePacketBuffer is zero-initialized, so buf[0..2] reads as 0x0000
-                // for sub-2-byte messages — harmless FORMERR with id=0.
-                let query_id = u16::from_be_bytes([buffer.buf[0], buffer.buf[1]]);
-                let mut resp = DnsPacket::new();
-                resp.header.id = query_id;
-                resp.header.response = true;
-                resp.header.rescode = ResultCode::FORMERR;
-                if send_response(&mut stream, &resp, remote_addr)
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-                continue;
-            }
-        };
-
-        match resolve_query(
-            query.clone(),
-            &buffer.buf[..msg_len],
-            remote_addr,
-            ctx,
-            Transport::Dot,
-        )
-        .await
-        {
-            Ok((resp_buffer, _)) => {
-                if write_framed(&mut stream, resp_buffer.filled())
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Err(e) => {
-                warn!("{} | RESOLVE ERROR | {}", remote_addr, e);
-                // SERVFAIL that echoes the original question section.
-                let resp = DnsPacket::response_from(&query, ResultCode::SERVFAIL);
-                if send_response(&mut stream, &resp, remote_addr)
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        }
-    }
-}
-
-/// Serialize a DNS response and send it framed. Logs serialization failures
-/// and returns Err so the caller can tear down the connection.
-async fn send_response<S>(
-    stream: &mut S,
-    resp: &DnsPacket,
-    remote_addr: SocketAddr,
-) -> std::io::Result<()>
-where
-    S: AsyncWriteExt + Unpin,
-{
-    let mut out_buf = BytePacketBuffer::new();
-    if resp.write(&mut out_buf).is_err() {
-        debug!(
-            "DoT: failed to serialize {:?} response for {}",
-            resp.header.rescode, remote_addr
-        );
-        return Err(std::io::Error::other("serialize failed"));
-    }
-    write_framed(stream, out_buf.filled()).await
-}
-
-/// Write a DNS message with its 2-byte length prefix, coalesced into one syscall.
-/// Bounded by WRITE_TIMEOUT so a stalled reader can't indefinitely hold a worker.
-async fn write_framed<S>(stream: &mut S, msg: &[u8]) -> std::io::Result<()>
-where
-    S: AsyncWriteExt + Unpin,
-{
-    let mut out = Vec::with_capacity(2 + msg.len());
-    out.extend_from_slice(&(msg.len() as u16).to_be_bytes());
-    out.extend_from_slice(msg);
-    match tokio::time::timeout(WRITE_TIMEOUT, async {
-        stream.write_all(&out).await?;
-        stream.flush().await
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(_) => Err(std::io::Error::other("write timeout")),
     }
 }
 
