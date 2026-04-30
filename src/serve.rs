@@ -562,8 +562,9 @@ pub async fn run(config_path: String) -> crate::Result<()> {
     {
         let tcp_ctx = Arc::clone(&ctx);
         let tcp_bind = config.server.bind_addr.clone();
+        let tcp_pp = config.server.proxy_protocol.clone();
         tokio::spawn(async move {
-            crate::tcp::start_tcp(tcp_ctx, &tcp_bind).await;
+            crate::tcp::start_tcp(tcp_ctx, &tcp_bind, &tcp_pp).await;
         });
     }
 

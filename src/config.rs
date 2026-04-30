@@ -99,6 +99,12 @@ pub struct ServerConfig {
     /// overrides, and the service proxy are not affected. Default false.
     #[serde(default)]
     pub filter_aaaa: bool,
+    /// PROXY protocol v2 ingress for the plain DNS-over-TCP listener.
+    /// Mirrors `[dot.proxy_protocol]` and `[proxy.proxy_protocol]`. Empty
+    /// `from` (default) disables the feature; non-empty puts the TCP
+    /// listener in PROXY-required mode.
+    #[serde(default)]
+    pub proxy_protocol: ProxyProtocolConfig,
 }
 
 impl Default for ServerConfig {
@@ -109,6 +115,7 @@ impl Default for ServerConfig {
             api_bind_addr: default_api_bind_addr(),
             data_dir: None,
             filter_aaaa: false,
+            proxy_protocol: ProxyProtocolConfig::default(),
         }
     }
 }

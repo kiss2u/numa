@@ -12,9 +12,11 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
 use crate::buffer::BytePacketBuffer;
+use crate::config::ProxyProtocolConfig;
 use crate::ctx::{resolve_query, ServerCtx};
 use crate::header::ResultCode;
 use crate::packet::DnsPacket;
+use crate::pp2::{self, PpConfig};
 use crate::stats::Transport;
 
 const MAX_CONNECTIONS: usize = 512;
@@ -25,7 +27,7 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_MSG_LEN: usize = 4096;
 
 /// Start the DNS-over-TCP listener on the same address as the UDP listener.
-pub async fn start_tcp(ctx: Arc<ServerCtx>, bind_addr: &str) {
+pub async fn start_tcp(ctx: Arc<ServerCtx>, bind_addr: &str, pp_cfg: &ProxyProtocolConfig) {
     let addr: SocketAddr = match bind_addr.parse() {
         Ok(a) => a,
         Err(e) => {
@@ -37,6 +39,10 @@ pub async fn start_tcp(ctx: Arc<ServerCtx>, bind_addr: &str) {
         }
     };
 
+    let Ok(pp) = pp2::init("TCP", pp_cfg) else {
+        return;
+    };
+
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -46,14 +52,14 @@ pub async fn start_tcp(ctx: Arc<ServerCtx>, bind_addr: &str) {
     };
     info!("TCP DNS listening on {}", addr);
 
-    accept_loop(listener, ctx).await;
+    accept_loop(listener, pp, ctx).await;
 }
 
-async fn accept_loop(listener: TcpListener, ctx: Arc<ServerCtx>) {
+async fn accept_loop(listener: TcpListener, pp: Option<Arc<PpConfig>>, ctx: Arc<ServerCtx>) {
     let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
 
     loop {
-        let (stream, peer) = match listener.accept().await {
+        let (tcp_stream, tcp_peer) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
                 error!("TCP: accept error: {}", e);
@@ -65,15 +71,23 @@ async fn accept_loop(listener: TcpListener, ctx: Arc<ServerCtx>) {
         let permit = match semaphore.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => {
-                debug!("TCP: connection limit reached, rejecting {}", peer);
+                debug!("TCP: connection limit reached, rejecting {}", tcp_peer);
                 continue;
             }
         };
         let ctx = Arc::clone(&ctx);
+        let pp = pp.clone();
 
         tokio::spawn(async move {
             let _permit = permit;
-            handle_framed_dns_connection(stream, peer, &ctx, Transport::Tcp).await;
+
+            let Some((stream, remote_addr)) =
+                pp2::handshake(tcp_stream, tcp_peer, pp.as_deref(), &ctx).await
+            else {
+                return;
+            };
+
+            handle_framed_dns_connection(stream, remote_addr, &ctx, Transport::Tcp).await;
         });
     }
 }
@@ -245,7 +259,7 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(accept_loop(listener, ctx));
+        tokio::spawn(accept_loop(listener, None, ctx));
         addr
     }
 
@@ -357,5 +371,84 @@ mod tests {
         for h in handles {
             h.await.unwrap();
         }
+    }
+
+    // PROXY protocol v2 wiring check. The pp2 module is exhaustively tested
+    // via dot::tests::pp2_*; this confirms tcp::accept_loop calls
+    // pp2::handshake before handing off to the framed handler. Mirrors
+    // doh::tests::pp2_doh_happy_path_ipv4.
+    async fn spawn_tcp_server_with_pp(pp_from: &[&str]) -> SocketAddr {
+        let upstream_addr = crate::testutil::blackhole_upstream();
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.zone_map = {
+            let mut m = HashMap::new();
+            let mut inner = HashMap::new();
+            inner.insert(
+                QueryType::A,
+                vec![DnsRecord::A {
+                    domain: "tcp-test.example".to_string(),
+                    addr: std::net::Ipv4Addr::new(10, 0, 0, 1),
+                    ttl: 300,
+                }],
+            );
+            m.insert("tcp-test.example".to_string(), inner);
+            m
+        };
+        ctx.upstream_pool = Mutex::new(crate::forward::UpstreamPool::new(
+            vec![crate::forward::Upstream::Udp(upstream_addr)],
+            vec![],
+        ));
+        let ctx = Arc::new(ctx);
+
+        let pp_cfg = crate::config::ProxyProtocolConfig {
+            from: pp_from.iter().map(|s| s.to_string()).collect(),
+            header_timeout_ms: 500,
+        };
+        let pp = PpConfig::from_config(&pp_cfg).unwrap().map(Arc::new);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(accept_loop(listener, pp, ctx));
+        addr
+    }
+
+    fn pp2_v4_proxy_header(
+        src_ip: std::net::Ipv4Addr,
+        dst_ip: std::net::Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let mut h = Vec::with_capacity(28);
+        h.extend_from_slice(&[
+            0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d, 0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a,
+        ]);
+        h.push(0x21); // v2 PROXY
+        h.push(0x11); // TCP/IPv4
+        h.extend_from_slice(&12u16.to_be_bytes());
+        h.extend_from_slice(&src_ip.octets());
+        h.extend_from_slice(&dst_ip.octets());
+        h.extend_from_slice(&src_port.to_be_bytes());
+        h.extend_from_slice(&dst_port.to_be_bytes());
+        h
+    }
+
+    #[tokio::test]
+    async fn pp2_tcp_happy_path_ipv4() {
+        let addr = spawn_tcp_server_with_pp(&["127.0.0.1"]).await;
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let pp = pp2_v4_proxy_header(
+            "203.0.113.42".parse().unwrap(),
+            "10.0.0.5".parse().unwrap(),
+            54321,
+            53,
+        );
+        stream.write_all(&pp).await.unwrap();
+
+        let query = DnsPacket::query(0xD001, "tcp-test.example", QueryType::A);
+        let resp = tcp_exchange(&mut stream, &query).await;
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(resp.answers.len(), 1);
     }
 }
