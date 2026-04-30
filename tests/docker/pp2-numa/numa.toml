@@ -1,0 +1,37 @@
+[server]
+bind_addr = "0.0.0.0:53"
+api_bind_addr = "0.0.0.0"
+api_port = 5380
+data_dir = "/var/lib/numa"
+
+# Trust the docker bridge subnets to send PROXY v2 headers on the plain
+# DNS-over-TCP listener. Empty `from` would disable the feature.
+[server.proxy_protocol]
+from = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+header_timeout_ms = 5000
+
+[upstream]
+mode = "forward"
+address = "9.9.9.9"
+
+[dot]
+enabled = true
+port = 853
+bind_addr = "0.0.0.0"
+
+# Trust dnsdist (and any other front-end on the docker bridge subnets)
+# to send PROXY v2 headers. Empty `from` would disable the feature.
+[dot.proxy_protocol]
+from = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+header_timeout_ms = 5000
+
+[proxy]
+enabled = true
+bind_addr = "127.0.0.1"
+tld = "numa"
+
+[mobile]
+enabled = false
+
+[blocking]
+enabled = false
