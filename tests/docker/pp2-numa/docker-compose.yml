@@ -1,0 +1,59 @@
+# End-to-end test stack for PR #156 (PROXY protocol v2 inbound on DoT/DoH).
+#
+#   host kdig +tls ──TLS──> haproxy :853 ──PROXY v2 + TLS bytes──> numa :853 ──forward──> 9.9.9.9
+#
+# HAProxy runs in `mode tcp` with `send-proxy-v2` so the PROXY header sits
+# OUTSIDE the TLS layer — exactly the wire shape numa's pp2 layer parses.
+# numa's API is exposed on 127.0.0.1:15380 so /stats.proxy_v2_* counters
+# are visible from the host.
+#
+# Why HAProxy, not dnsdist:
+#   dnsdist's `useProxyProtocol=true` for a TLS backend sends the PROXY
+#   header INSIDE the TLS session ("encrypted PROXY", BIND 9's
+#   `proxy encrypted` mode). PR #156 explicitly lists this as out of
+#   scope. Other L4 front-ends with PROXY-outside-TLS work the same
+#   way as HAProxy here: nginx stream module, AWS NLB, GCP TCP LB.
+
+services:
+  numa:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile
+    image: numa:pp2-test
+    volumes:
+      - ./numa.toml:/etc/numa/numa.toml:ro
+      - numa_data:/var/lib/numa
+    command: ["/etc/numa/numa.toml"]
+    environment:
+      RUST_LOG: "info,numa::pp2=debug"
+    networks:
+      test:
+        ipv4_address: 172.28.0.10
+    expose:
+      - "53"
+      - "853"
+    ports:
+      - "127.0.0.1:15380:5380/tcp"
+
+  haproxy:
+    image: haproxy:2.9-alpine
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      test:
+        ipv4_address: 172.28.0.20
+    ports:
+      - "127.0.0.1:5853:853/tcp"
+      - "127.0.0.1:15353:53/tcp"
+    depends_on:
+      - numa
+
+networks:
+  test:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  numa_data:

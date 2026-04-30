@@ -99,6 +99,12 @@ pub struct ServerConfig {
     /// overrides, and the service proxy are not affected. Default false.
     #[serde(default)]
     pub filter_aaaa: bool,
+    /// PROXY protocol v2 ingress for the plain DNS-over-TCP listener.
+    /// Mirrors `[dot.proxy_protocol]` and `[proxy.proxy_protocol]`. Empty
+    /// `from` (default) disables the feature; non-empty puts the TCP
+    /// listener in PROXY-required mode.
+    #[serde(default)]
+    pub proxy_protocol: ProxyProtocolConfig,
 }
 
 impl Default for ServerConfig {
@@ -109,6 +115,7 @@ impl Default for ServerConfig {
             api_bind_addr: default_api_bind_addr(),
             data_dir: None,
             filter_aaaa: false,
+            proxy_protocol: ProxyProtocolConfig::default(),
         }
     }
 }
@@ -552,6 +559,8 @@ pub struct ProxyConfig {
     pub tld: String,
     #[serde(default = "default_proxy_bind_addr")]
     pub bind_addr: String,
+    #[serde(default)]
+    pub proxy_protocol: ProxyProtocolConfig,
 }
 
 impl Default for ProxyConfig {
@@ -562,8 +571,44 @@ impl Default for ProxyConfig {
             tls_port: default_proxy_tls_port(),
             tld: default_proxy_tld(),
             bind_addr: default_proxy_bind_addr(),
+            proxy_protocol: ProxyProtocolConfig::default(),
         }
     }
+}
+
+/// PROXY protocol v2 settings for an L4-fronted listener.
+///
+/// Naming mirrors PowerDNS Recursor's `proxy-protocol-from` for least
+/// operator surprise. An empty `from` allowlist disables the feature on
+/// this listener.
+#[derive(Deserialize, Clone, Debug)]
+pub struct ProxyProtocolConfig {
+    /// CIDR allowlist of TCP peers permitted to send PROXY v2 headers.
+    /// Empty list = feature disabled. Non-empty = listener is in
+    /// PROXY-required mode: connections from listed senders that omit
+    /// the header are dropped, and connections from non-listed senders
+    /// are dropped before any read.
+    #[serde(default)]
+    pub from: Vec<String>,
+
+    /// Header read timeout, in milliseconds. Default 5000 matches
+    /// hyper-server. Separate knob from TLS HANDSHAKE_TIMEOUT — different
+    /// attack pattern (slowloris on the PROXY header).
+    #[serde(default = "default_pp_header_timeout_ms")]
+    pub header_timeout_ms: u64,
+}
+
+impl Default for ProxyProtocolConfig {
+    fn default() -> Self {
+        ProxyProtocolConfig {
+            from: Vec::new(),
+            header_timeout_ms: default_pp_header_timeout_ms(),
+        }
+    }
+}
+
+fn default_pp_header_timeout_ms() -> u64 {
+    5000
 }
 
 fn default_proxy_bind_addr() -> String {
@@ -643,6 +688,8 @@ pub struct DotConfig {
     /// Path to TLS private key (PEM). If None, uses self-signed CA.
     #[serde(default)]
     pub key_path: Option<PathBuf>,
+    #[serde(default)]
+    pub proxy_protocol: ProxyProtocolConfig,
 }
 
 impl Default for DotConfig {
@@ -653,6 +700,7 @@ impl Default for DotConfig {
             bind_addr: default_dot_bind_addr(),
             cert_path: None,
             key_path: None,
+            proxy_protocol: ProxyProtocolConfig::default(),
         }
     }
 }

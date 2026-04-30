@@ -14,7 +14,9 @@ use log::{debug, error, info, warn};
 use tokio::io::copy_bidirectional;
 use tokio_rustls::TlsAcceptor;
 
+use crate::config::ProxyProtocolConfig;
 use crate::ctx::ServerCtx;
+use crate::pp2::{self, PpConfig};
 
 type HttpClient = Client<hyper_util::client::legacy::connect::HttpConnector, Body>;
 
@@ -57,7 +59,12 @@ pub async fn start_proxy(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr) {
     axum::serve(listener, app).await.unwrap();
 }
 
-pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr) {
+pub async fn start_proxy_tls(
+    ctx: Arc<ServerCtx>,
+    port: u16,
+    bind_addr: Ipv4Addr,
+    pp_cfg: &ProxyProtocolConfig,
+) {
     let addr: SocketAddr = (bind_addr, port).into();
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -76,12 +83,22 @@ pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr
         return;
     }
 
+    let Ok(pp) = pp2::init("proxy", pp_cfg) else {
+        return;
+    };
+
+    accept_loop_tls(listener, ctx, pp).await;
+}
+
+async fn accept_loop_tls(
+    listener: tokio::net::TcpListener,
+    ctx: Arc<ServerCtx>,
+    pp: Option<Arc<PpConfig>>,
+) {
     let client: HttpClient = Client::builder(TokioExecutor::new())
         .http1_preserve_header_case(true)
         .build_http();
 
-    // Hold a separate Arc so we can access tls_config after ctx moves into ProxyState
-    let tls_holder = Arc::clone(&ctx);
     let proxy_state = ProxyState {
         ctx: Arc::clone(&ctx),
         client,
@@ -90,12 +107,12 @@ pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr
     // DoH route (RFC 8484) served only on the TLS listener.
     // DohState.remote_addr is set per-connection below.
     let doh_state = DohState {
-        ctx,
+        ctx: Arc::clone(&ctx),
         remote_addr: None,
     };
 
     loop {
-        let (tcp_stream, remote_addr) = match listener.accept().await {
+        let (tcp_stream, tcp_peer) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
                 error!("TLS accept error: {}", e);
@@ -104,23 +121,33 @@ pub async fn start_proxy_tls(ctx: Arc<ServerCtx>, port: u16, bind_addr: Ipv4Addr
         };
 
         // Load the latest TLS config on each connection (picks up new service certs)
-        // unwrap safe: guarded by is_none() check above
-        let acceptor =
-            TlsAcceptor::from(Arc::clone(&*tls_holder.tls_config.as_ref().unwrap().load()));
+        // unwrap safe: caller guards on ctx.tls_config.is_some()
+        let acceptor = TlsAcceptor::from(Arc::clone(&*ctx.tls_config.as_ref().unwrap().load()));
 
-        let mut conn_doh_state = doh_state.clone();
-        conn_doh_state.remote_addr = Some(remote_addr);
-
-        let app = Router::new()
-            .route(
-                "/dns-query",
-                post(crate::doh::doh_post).with_state(conn_doh_state),
-            )
-            .fallback(any(proxy_handler))
-            .with_state(proxy_state.clone());
+        let proxy_state = proxy_state.clone();
+        let doh_state = doh_state.clone();
+        let ctx_for_pp2 = Arc::clone(&ctx);
+        let pp = pp.clone();
 
         tokio::spawn(async move {
-            let tls_stream = match acceptor.accept(tcp_stream).await {
+            let Some((stream, remote_addr)) =
+                pp2::handshake(tcp_stream, tcp_peer, pp.as_deref(), &ctx_for_pp2).await
+            else {
+                return;
+            };
+
+            let mut conn_doh_state = doh_state;
+            conn_doh_state.remote_addr = Some(remote_addr);
+
+            let app = Router::new()
+                .route(
+                    "/dns-query",
+                    post(crate::doh::doh_post).with_state(conn_doh_state),
+                )
+                .fallback(any(proxy_handler))
+                .with_state(proxy_state);
+
+            let tls_stream = match acceptor.accept(stream).await {
                 Ok(s) => s,
                 Err(e) => {
                     debug!("TLS handshake failed from {}: {}", remote_addr, e);
@@ -427,4 +454,187 @@ async fn handle_upgrade(
         resp = resp.header(key, value);
     }
     resp.body(Body::empty()).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use rcgen::{CertificateParams, DnType, KeyPair};
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+    use rustls::ServerConfig;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use crate::buffer::BytePacketBuffer;
+    use crate::header::ResultCode;
+    use crate::packet::DnsPacket;
+    use crate::question::QueryType;
+    use crate::record::DnsRecord;
+
+    /// Self-signed TLS server config that vouches for `*.numa` + `numa.numa`,
+    /// matching the SAN shape produced by `tls::build_tls_config` in production.
+    fn test_tls_configs() -> (Arc<ServerConfig>, CertificateDer<'static>) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let key_pair = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::default();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "Numa .numa services");
+        params.subject_alt_names = vec![
+            rcgen::SanType::DnsName("*.numa".try_into().unwrap()),
+            rcgen::SanType::DnsName("numa.numa".try_into().unwrap()),
+        ];
+        let cert = params.self_signed(&key_pair).unwrap();
+
+        let cert_der = CertificateDer::from(cert.der().to_vec());
+        let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+
+        let server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der.clone()], key_der)
+            .unwrap();
+
+        (Arc::new(server_config), cert_der)
+    }
+
+    /// Wire a PROXY v2 IPv4 PROXY-command header (28 bytes total).
+    fn pp2_v4_proxy(
+        src_ip: std::net::Ipv4Addr,
+        dst_ip: std::net::Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let mut h = Vec::with_capacity(28);
+        h.extend_from_slice(&[
+            0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d, 0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a,
+        ]);
+        h.push(0x21); // v2 PROXY
+        h.push(0x11); // TCP/IPv4
+        h.extend_from_slice(&12u16.to_be_bytes());
+        h.extend_from_slice(&src_ip.octets());
+        h.extend_from_slice(&dst_ip.octets());
+        h.extend_from_slice(&src_port.to_be_bytes());
+        h.extend_from_slice(&dst_port.to_be_bytes());
+        h
+    }
+
+    /// Spin up a DoH-capable TLS listener with a PROXY v2 allowlist.
+    async fn spawn_doh_server_with_pp(pp_from: &[&str]) -> (SocketAddr, CertificateDer<'static>) {
+        let (server_tls, cert_der) = test_tls_configs();
+        let upstream_addr = crate::testutil::blackhole_upstream();
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.zone_map = {
+            let mut m = HashMap::new();
+            let mut inner = HashMap::new();
+            inner.insert(
+                QueryType::A,
+                vec![DnsRecord::A {
+                    domain: "doh-test.example".to_string(),
+                    addr: std::net::Ipv4Addr::new(10, 0, 0, 2),
+                    ttl: 300,
+                }],
+            );
+            m.insert("doh-test.example".to_string(), inner);
+            m
+        };
+        ctx.upstream_pool = Mutex::new(crate::forward::UpstreamPool::new(
+            vec![crate::forward::Upstream::Udp(upstream_addr)],
+            vec![],
+        ));
+        ctx.tls_config = Some(arc_swap::ArcSwap::from(server_tls));
+        let ctx = Arc::new(ctx);
+
+        let pp_cfg = ProxyProtocolConfig {
+            from: pp_from.iter().map(|s| s.to_string()).collect(),
+            header_timeout_ms: 500,
+        };
+        let pp = PpConfig::from_config(&pp_cfg).unwrap().map(Arc::new);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(accept_loop_tls(listener, ctx, pp));
+
+        (addr, cert_der)
+    }
+
+    /// Drive a single HTTP/1.1 `POST /dns-query` over an open TLS stream.
+    /// Sends `Connection: close` so the server tears down after the body and
+    /// `read_to_end` terminates without keep-alive bookkeeping.
+    async fn doh_post_raw(
+        stream: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+        query_wire: &[u8],
+    ) -> (u16, Vec<u8>) {
+        let head = format!(
+            "POST /dns-query HTTP/1.1\r\n\
+             Host: numa.numa\r\n\
+             Content-Type: application/dns-message\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n",
+            query_wire.len(),
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream.write_all(query_wire).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut all = Vec::new();
+        stream.read_to_end(&mut all).await.unwrap();
+
+        let split = all
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("HTTP header/body separator");
+        let header_block = std::str::from_utf8(&all[..split]).unwrap();
+        let status: u16 = header_block
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .expect("HTTP status line");
+        (status, all[split + 4..].to_vec())
+    }
+
+    #[tokio::test]
+    async fn pp2_doh_happy_path_ipv4() {
+        // Trusted client (127.0.0.1) sends a v4 PROXY header before the TLS
+        // ClientHello; server completes TLS, parses the wire DNS message,
+        // and returns NOERROR with the local-zone A record.
+        let (addr, cert_der) = spawn_doh_server_with_pp(&["127.0.0.1"]).await;
+
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.add(cert_der).unwrap();
+        let client_config = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth(),
+        );
+
+        let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let pp = pp2_v4_proxy(
+            "203.0.113.42".parse().unwrap(),
+            "10.0.0.5".parse().unwrap(),
+            54321,
+            443,
+        );
+        tcp.write_all(&pp).await.unwrap();
+        let connector = tokio_rustls::TlsConnector::from(client_config);
+        let mut stream = connector
+            .connect(ServerName::try_from("numa.numa").unwrap(), tcp)
+            .await
+            .expect("PROXY v2 + TLS handshake must succeed for trusted peer");
+
+        let query = DnsPacket::query(0xE001, "doh-test.example", QueryType::A);
+        let mut q_buf = BytePacketBuffer::new();
+        query.write(&mut q_buf).unwrap();
+
+        let (status, body) = doh_post_raw(&mut stream, q_buf.filled()).await;
+        assert_eq!(status, 200);
+        let mut r_buf = BytePacketBuffer::from_bytes(&body);
+        let resp = DnsPacket::from_buffer(&mut r_buf).unwrap();
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert_eq!(resp.answers.len(), 1);
+    }
 }
