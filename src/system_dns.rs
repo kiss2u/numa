@@ -962,10 +962,12 @@ fn uninstall_windows() -> Result<(), String> {
         serde_json::from_str(&json).map_err(|e| format!("invalid backup file: {}", e))?;
 
     let live = get_windows_interfaces()?;
+    let mut skipped: Vec<&str> = Vec::new();
 
     for (name, dns_info) in &original {
         let Some(idx) = live.get(name).map(|i| i.if_index.to_string()) else {
             eprintln!("  warning: adapter \"{}\" not currently up; skipped", name);
+            skipped.push(name.as_str());
             continue;
         };
 
@@ -1019,11 +1021,23 @@ fn uninstall_windows() -> Result<(), String> {
         }
     }
 
-    std::fs::remove_file(&path).ok();
-
-    // Re-enable Dnscache
+    // Keep the backup if any adapter from it wasn't reachable — without
+    // this, an offline `numa uninstall` (laptop undocked, all NICs down)
+    // would silently delete the only record of the user's pre-numa DNS,
+    // leaving the per-adapter NameServer registry pinned at 127.0.0.1
+    // with nothing to recover from when the network returns.
     enable_dnscache();
-    eprintln!("\n  System DNS restored. DNS Client re-enabled.");
+    if skipped.is_empty() {
+        std::fs::remove_file(&path).ok();
+        eprintln!("\n  System DNS restored. DNS Client re-enabled.");
+    } else {
+        eprintln!(
+            "\n  Partial restore. Backup kept at {} — re-run 'numa uninstall' after reconnecting: {}",
+            path.display(),
+            skipped.join(", ")
+        );
+        eprintln!("  DNS Client re-enabled.");
+    }
     eprintln!("  Reboot to fully restore the DNS Client service.\n");
     Ok(())
 }
