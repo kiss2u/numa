@@ -490,12 +490,9 @@ fn discover_windows() -> SystemDnsInfo {
 #[cfg(any(windows, test))]
 #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
 struct WindowsInterfaceDns {
-    // Live adapter index, resolved fresh from `Get-NetAdapter` and passed to
-    // netsh as the [name=] argument — friendly names round-trip badly on
-    // non-English locales (#160: "Ethernet" returned ERROR_INVALID_NAME on
-    // ru-RU), the integer ifIndex doesn't. Skipped during serialize because
-    // ifIndex isn't stable across reboots; the on-disk backup stays keyed
-    // by friendly name and looks the index up live at restore time.
+    // Passed to netsh's [name=] slot since friendly names fail with
+    // ERROR_INVALID_NAME on non-English locales (#160). Resolved live at
+    // restore time — ifIndex isn't stable across reboots.
     #[serde(default, skip_serializing)]
     if_index: u32,
     servers: Vec<String>,
@@ -1021,11 +1018,9 @@ fn uninstall_windows() -> Result<(), String> {
         }
     }
 
-    // Keep the backup if any adapter from it wasn't reachable — without
-    // this, an offline `numa uninstall` (laptop undocked, all NICs down)
-    // would silently delete the only record of the user's pre-numa DNS,
-    // leaving the per-adapter NameServer registry pinned at 127.0.0.1
-    // with nothing to recover from when the network returns.
+    // Keep the backup if any adapter wasn't reachable — an offline
+    // uninstall would otherwise leave the registry pinned at 127.0.0.1
+    // with no recovery state for when the network returns.
     enable_dnscache();
     if skipped.is_empty() {
         std::fs::remove_file(&path).ok();
