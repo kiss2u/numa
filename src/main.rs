@@ -101,7 +101,7 @@ fn main() -> numa::Result<()> {
             };
         }
         "version" | "--version" | "-V" => {
-            eprintln!("numa {}", env!("CARGO_PKG_VERSION"));
+            eprintln!("numa {}", numa::version());
             return Ok(());
         }
         "help" | "--help" | "-h" => {
