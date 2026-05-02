@@ -439,12 +439,10 @@ fn print_banner(
     };
 
     let tag_line = "DNS that governs itself";
-    let title = format!(
-        "{b}NUMA{r}  {it}{tag_line}{r}  {d}v{}{r}",
-        env!("CARGO_PKG_VERSION")
-    );
-    let title_visible_len = 4 + 2 + tag_line.len() + 2 + 1 + env!("CARGO_PKG_VERSION").len() + 1;
-    let title_pad = w.saturating_sub(title_visible_len);
+    let v = crate::version();
+    let title = format!("{b}NUMA{r}  {it}{tag_line}{r}  {d}v{v}{r}");
+    let title_plain = format!("NUMA  {tag_line}  v{v}");
+    let title_pad = w.saturating_sub(1 + title_plain.chars().count());
     eprintln!("\n{o}  ╔{bar_top}╗{r}");
     eprint!("{o}  ║{r} {title}");
     eprintln!("{}{o}║{r}", " ".repeat(title_pad));
