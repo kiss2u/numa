@@ -405,7 +405,13 @@ fn print_banner(
     let data_label = ctx.data_dir.display().to_string();
     let services_label = ctx.config_dir.join("services.json").display().to_string();
 
-    // label (10) + value + padding (2) = inner width; minimum 40 for the title row
+    let tag_line = "DNS that governs itself";
+    let v = crate::version();
+    let title_plain = format!("NUMA  {tag_line}  v{v}");
+
+    // label (10) + value + padding (2) = inner width; widen further if the
+    // title row (variable-length once the version carries a +SHA suffix)
+    // would overflow.
     let val_w = [
         config.server.bind_addr.len(),
         api_url.len(),
@@ -418,7 +424,7 @@ fn print_banner(
     .chain(proxy_label.as_ref().map(|s| s.len()))
     .max()
     .unwrap_or(30);
-    let w = (val_w + 12).max(42);
+    let w = (val_w + 12).max(42).max(1 + title_plain.chars().count());
 
     let o = "\x1b[38;2;192;98;58m";
     let g = "\x1b[38;2;107;124;78m";
@@ -438,11 +444,8 @@ fn print_banner(
         );
     };
 
-    let tag_line = "DNS that governs itself";
-    let v = crate::version();
     let title = format!("{b}NUMA{r}  {it}{tag_line}{r}  {d}v{v}{r}");
-    let title_plain = format!("NUMA  {tag_line}  v{v}");
-    let title_pad = w.saturating_sub(1 + title_plain.chars().count());
+    let title_pad = w - 1 - title_plain.chars().count();
     eprintln!("\n{o}  ╔{bar_top}╗{r}");
     eprint!("{o}  ║{r} {title}");
     eprintln!("{}{o}║{r}", " ".repeat(title_pad));
