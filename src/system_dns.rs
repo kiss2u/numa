@@ -1215,6 +1215,11 @@ fn install_macos() -> Result<(), String> {
             .status();
     }
 
+    // Anchor `.numa` resolution to numa via /etc/resolver — survives
+    // VPN/MagicDNS clients (Tailscale, WireGuard) that install themselves
+    // as the unscoped resolver and would otherwise NXDOMAIN our TLD.
+    write_resolver_dropin();
+
     eprintln!();
     if !has_useful_existing {
         eprintln!("  Original DNS saved to {}", backup_path().display());
@@ -1224,9 +1229,59 @@ fn install_macos() -> Result<(), String> {
     Ok(())
 }
 
+/// `/etc/resolver/<tld>` tells macOS: for queries under `.<tld>`, ALWAYS
+/// use this nameserver, regardless of the global resolver chain. Without
+/// it, a VPN that registers itself as the unscoped resolver intercepts
+/// `.numa` lookups and returns NXDOMAIN.
+#[cfg(target_os = "macos")]
+fn write_resolver_dropin() {
+    let path = std::path::Path::new(MACOS_RESOLVER_DROPIN);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("  warning: failed to create {}: {}", parent.display(), e);
+            return;
+        }
+    }
+    if let Err(e) = std::fs::write(path, "nameserver 127.0.0.1\n") {
+        eprintln!("  warning: failed to write {}: {}", path.display(), e);
+        return;
+    }
+    // Force mDNSResponder to re-read /etc/resolver/* immediately. Without
+    // a flush, the new file is picked up only after FSEvents propagation
+    // (seconds) or until the negative cache for `.numa` lookups expires.
+    let _ = std::process::Command::new("killall")
+        .args(["-HUP", "mDNSResponder"])
+        .status();
+    eprintln!("  Anchored .numa resolution at {}", path.display());
+}
+
+#[cfg(target_os = "macos")]
+fn remove_resolver_dropin() {
+    let path = std::path::Path::new(MACOS_RESOLVER_DROPIN);
+    match std::fs::remove_file(path) {
+        Ok(_) => {
+            let _ = std::process::Command::new("killall")
+                .args(["-HUP", "mDNSResponder"])
+                .status();
+            eprintln!("  Removed {}", path.display());
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => eprintln!("  warning: failed to remove {}: {}", path.display(), e),
+    }
+}
+
+#[cfg(target_os = "macos")]
+const MACOS_RESOLVER_DROPIN: &str = "/etc/resolver/numa";
+
 #[cfg(target_os = "macos")]
 fn uninstall_macos() -> Result<(), String> {
     use std::collections::HashMap;
+
+    // /etc/resolver/numa is written by every regular install (and not by
+    // --no-system-dns), so always attempt removal regardless of whether a
+    // backup exists. remove_resolver_dropin is a no-op when the file is
+    // already gone.
+    remove_resolver_dropin();
 
     let path = backup_path();
     let json = match std::fs::read_to_string(&path) {
