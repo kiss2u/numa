@@ -365,6 +365,9 @@ async fn resolve_remote(
         }
         let mut resp = cached;
         resp.header.id = query.header.id;
+        resp.header.recursion_desired = query.header.recursion_desired;
+        resp.header.recursion_available = true;
+        resp.questions = query.questions.clone();
         if cached_dnssec == DnssecStatus::Secure {
             resp.header.authed_data = true;
         }
@@ -1667,5 +1670,35 @@ mod tests {
             DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(10, 0, 0, 7)),
             other => panic!("expected A record, got {:?}", other),
         }
+    }
+
+    /// #188: cache entries synthesized internally (e.g. NS delegation snapshots)
+    /// have no question section and no rd/ra flags. The cache-hit serve path
+    /// must restore these from the client query before returning to the wire.
+    #[tokio::test]
+    async fn cache_hit_restores_question_and_rd_ra_from_client_query() {
+        let mut malformed = DnsPacket::new();
+        malformed.header.response = true;
+        malformed.header.rescode = ResultCode::NOERROR;
+        malformed.answers.push(DnsRecord::NS {
+            domain: "ikea.com".into(),
+            host: "udns1.cscdns.net".into(),
+            ttl: 86400,
+        });
+
+        let ctx = Arc::new(crate::testutil::test_ctx().await);
+        ctx.cache
+            .write()
+            .unwrap()
+            .insert("ikea.com", QueryType::NS, &malformed);
+
+        let (resp, path) = resolve_in_test(&ctx, "ikea.com", QueryType::NS).await;
+
+        assert_eq!(path, QueryPath::Cached);
+        assert_eq!(resp.questions.len(), 1);
+        assert_eq!(resp.questions[0].name, "ikea.com");
+        assert_eq!(resp.questions[0].qtype, QueryType::NS);
+        assert!(resp.header.recursion_desired);
+        assert!(resp.header.recursion_available);
     }
 }
