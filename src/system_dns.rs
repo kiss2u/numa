@@ -1288,7 +1288,7 @@ fn uninstall_macos() -> Result<(), String> {
 // --- Service management ---
 
 #[cfg(target_os = "macos")]
-const PLIST_LABEL: &str = "com.numa.dns";
+const PLIST_SYSTEM_TARGET: &str = "system/com.numa.dns";
 #[cfg(target_os = "macos")]
 const PLIST_DEST: &str = "/Library/LaunchDaemons/com.numa.dns.plist";
 #[cfg(target_os = "linux")]
@@ -1426,7 +1426,7 @@ pub fn restart_service() -> Result<(), String> {
     {
         let exe_path = exe_path.to_string_lossy();
         let output = std::process::Command::new("launchctl")
-            .args(["list", PLIST_LABEL])
+            .args(["print", PLIST_SYSTEM_TARGET])
             .output();
         match output {
             Ok(o) if o.status.success() => {
@@ -1590,8 +1590,10 @@ fn uninstall_service_macos() -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn service_status_macos() -> Result<(), String> {
+    // `list <label>` only searches the caller's bootstrap domain (gui/<uid>);
+    // our daemon is bootstrapped into `system`, so target it explicitly.
     let output = std::process::Command::new("launchctl")
-        .args(["list", PLIST_LABEL])
+        .args(["print", PLIST_SYSTEM_TARGET])
         .output()
         .map_err(|e| format!("failed to run launchctl: {}", e))?;
 
