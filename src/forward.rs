@@ -483,13 +483,6 @@ pub async fn forward_with_hedging_raw(
     }
 }
 
-/// Primaries with SRTT at or above this are skipped when a fallback is
-/// available — saves the per-query timeout cost on networks where UDP:53 is
-/// known broken (RDS-style amplification mitigation, BCP 38). Decay
-/// (`srtt::DECAY_AFTER_SECS`) eventually drops the SRTT back below the
-/// threshold so the primary is re-probed if the network changes.
-const PRIMARY_SKIP_SRTT_MS: u64 = 4000;
-
 pub async fn forward_with_failover_raw(
     wire: &[u8],
     pool: &UpstreamPool,
@@ -513,7 +506,7 @@ pub async fn forward_with_failover_raw(
     let has_fallback = !pool.fallback.is_empty();
     let all_upstreams: Vec<&Upstream> = candidates
         .iter()
-        .filter(|&&(_, rtt)| !has_fallback || rtt < PRIMARY_SKIP_SRTT_MS)
+        .filter(|&&(_, rtt)| !has_fallback || rtt < crate::srtt::PRIMARY_SKIP_SRTT_MS)
         .map(|&(i, _)| &pool.primary[i])
         .chain(pool.fallback.iter())
         .collect();

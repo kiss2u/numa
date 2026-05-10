@@ -596,12 +596,9 @@ async fn resolve_upstream_pool(
                 Some(bootstrap_resolver.clone()),
             )?;
 
-            // Pair every UDP primary with a TCP sibling in fallback, so a
-            // UDP-hostile network (carriers running BCP 38-style amplification
-            // mitigation drop outbound UDP:53 to non-self resolvers) doesn't
-            // break Forward mode. SRTT circuit-breaker in the failover loop
-            // skips the UDP primary once it's known broken — TCP fallback
-            // runs directly without paying the UDP timeout per query.
+            // Pair every UDP primary with a TCP sibling in fallback so
+            // Forward mode survives carriers that drop outbound UDP:53
+            // for amplification mitigation (BCP 38).
             for u in &primary {
                 if let crate::forward::Upstream::Udp(addr) = u {
                     let tcp = crate::forward::Upstream::Tcp(*addr);
