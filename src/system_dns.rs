@@ -1444,28 +1444,23 @@ fn binary_version(exe_path: &std::path::Path) -> String {
     }
 }
 
-/// Restart the macOS daemon by label using `launchctl kickstart -k`. Decoupled
-/// from the CLI's `current_exe()` — the daemon's actual binary path lives in
-/// the plist's `ProgramArguments[0]`, which may differ from where the CLI is
-/// installed (e.g. dev-checkout install vs `/usr/local/bin/numa`). Pre-restart
-/// codesign targets that plist path so the bytes launchd re-exec's are signed.
+/// Restart the macOS daemon by label via `launchctl kickstart -k` — works
+/// regardless of where the CLI binary lives, unlike the old `pkill -f current_exe`.
+/// Codesigns the binary path read from `launchctl print` (in-memory state, which
+/// is what `kickstart` will re-exec — the on-disk plist can diverge).
 #[cfg(target_os = "macos")]
 fn restart_service_macos() -> Result<(), String> {
     let print = std::process::Command::new("launchctl")
         .args(["print", PLIST_SYSTEM_TARGET])
-        .output();
-    match print {
-        Ok(o) if o.status.success() => {}
-        _ => {
-            return Err(
-                "Service is not installed. Run 'sudo numa service start' first.".to_string(),
-            );
-        }
+        .output()
+        .map_err(|e| format!("failed to run launchctl print: {}", e))?;
+    if !print.status.success() {
+        return Err("Service is not installed. Run 'sudo numa service start' first.".to_string());
     }
+    let plist_exe = parse_launchctl_program(&print.stdout)?;
 
     eprintln!("  Tip: use 'make deploy' instead — handles codesign + restart.\n");
 
-    let plist_exe = plist_program_path()?;
     let version = binary_version(std::path::Path::new(&plist_exe));
     let _ = std::process::Command::new("codesign")
         .args(["-f", "-s", "-", &plist_exe])
@@ -1482,27 +1477,13 @@ fn restart_service_macos() -> Result<(), String> {
     Ok(())
 }
 
-/// Read the daemon's binary path from the on-disk plist's `ProgramArguments[0]`
-/// via PlistBuddy (always present on macOS). Authoritative source for what
-/// launchd will re-exec on `kickstart`.
 #[cfg(target_os = "macos")]
-fn plist_program_path() -> Result<String, String> {
-    let out = std::process::Command::new("/usr/libexec/PlistBuddy")
-        .args(["-c", "Print :ProgramArguments:0", PLIST_DEST])
-        .output()
-        .map_err(|e| format!("failed to run PlistBuddy: {}", e))?;
-    if !out.status.success() {
-        return Err(format!(
-            "could not read ProgramArguments from {}: {}",
-            PLIST_DEST,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if path.is_empty() {
-        return Err(format!("empty ProgramArguments[0] in {}", PLIST_DEST));
-    }
-    Ok(path)
+fn parse_launchctl_program(stdout: &[u8]) -> Result<String, String> {
+    std::str::from_utf8(stdout)
+        .map_err(|e| format!("launchctl print: invalid utf-8: {}", e))?
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("program = ").map(str::to_string))
+        .ok_or_else(|| "launchctl print: 'program' line not found".to_string())
 }
 
 /// Show the service status.
@@ -2146,6 +2127,23 @@ fn untrust_ca_windows() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_launchctl_program_extracts_path() {
+        let sample = b"system/com.numa.dns = {\n\tactive count = 1\n\tpath = /Library/LaunchDaemons/com.numa.dns.plist\n\ttype = LaunchDaemon\n\tstate = running\n\n\tprogram = /Users/rd/projects/dns_fun/target/release/numa\n\targuments = {\n";
+        assert_eq!(
+            parse_launchctl_program(sample).unwrap(),
+            "/Users/rd/projects/dns_fun/target/release/numa"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_launchctl_program_errors_when_missing() {
+        let sample = b"system/com.numa.dns = {\n\tactive count = 1\n}";
+        assert!(parse_launchctl_program(sample).is_err());
+    }
 
     #[test]
     fn parse_powershell_servers() {
