@@ -1407,47 +1407,15 @@ pub fn uninstall_service() -> Result<(), String> {
 
 /// Restart the service (kill process, launchd/systemd auto-restarts with new binary).
 pub fn restart_service() -> Result<(), String> {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let exe_path =
-        std::env::current_exe().map_err(|e| format!("failed to get current exe: {}", e))?;
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let version = {
-        match std::process::Command::new(&exe_path)
-            .arg("--version")
-            .output()
-        {
-            Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
-            Err(_) => "unknown".to_string(),
-        }
-    };
-
     #[cfg(target_os = "macos")]
     {
-        let exe_path = exe_path.to_string_lossy();
-        let output = std::process::Command::new("launchctl")
-            .args(["print", PLIST_SYSTEM_TARGET])
-            .output();
-        match output {
-            Ok(o) if o.status.success() => {
-                eprintln!("  Tip: use 'make deploy' instead — handles codesign + restart.\n");
-                // Codesign, then kill service. Launchd KeepAlive respawns it.
-                // This will kill us too (we ARE /usr/local/bin/numa), so
-                // codesign and print output first.
-                let _ = std::process::Command::new("codesign")
-                    .args(["-f", "-s", "-", &exe_path])
-                    .output(); // use output() to suppress codesign stderr
-                eprintln!("  Service restarting → {}\n", version);
-                let _ = std::process::Command::new("pkill")
-                    .args(["-f", &exe_path])
-                    .status();
-                Ok(())
-            }
-            _ => Err("Service is not installed. Run 'sudo numa service start' first.".to_string()),
-        }
+        restart_service_macos()
     }
     #[cfg(target_os = "linux")]
     {
+        let exe_path =
+            std::env::current_exe().map_err(|e| format!("failed to get current exe: {}", e))?;
+        let version = binary_version(&exe_path);
         run_systemctl(&["restart", "numa"])?;
         eprintln!("  Service restarted → {}\n", version);
         Ok(())
@@ -1463,6 +1431,59 @@ pub fn restart_service() -> Result<(), String> {
     {
         Err("service restart not supported on this OS".to_string())
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn binary_version(exe_path: &std::path::Path) -> String {
+    match std::process::Command::new(exe_path)
+        .arg("--version")
+        .output()
+    {
+        Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        Err(_) => "unknown".to_string(),
+    }
+}
+
+/// Restart the macOS daemon by label via `launchctl kickstart -k` — works
+/// regardless of where the CLI binary lives, unlike the old `pkill -f current_exe`.
+/// Codesigns the binary path read from `launchctl print` (in-memory state, which
+/// is what `kickstart` will re-exec — the on-disk plist can diverge).
+#[cfg(target_os = "macos")]
+fn restart_service_macos() -> Result<(), String> {
+    let print = std::process::Command::new("launchctl")
+        .args(["print", PLIST_SYSTEM_TARGET])
+        .output()
+        .map_err(|e| format!("failed to run launchctl print: {}", e))?;
+    if !print.status.success() {
+        return Err("Service is not installed. Run 'sudo numa service start' first.".to_string());
+    }
+    let plist_exe = parse_launchctl_program(&print.stdout)?;
+
+    eprintln!("  Tip: use 'make deploy' instead — handles codesign + restart.\n");
+
+    let version = binary_version(std::path::Path::new(&plist_exe));
+    let _ = std::process::Command::new("codesign")
+        .args(["-f", "-s", "-", &plist_exe])
+        .output();
+
+    let status = std::process::Command::new("launchctl")
+        .args(["kickstart", "-k", PLIST_SYSTEM_TARGET])
+        .status()
+        .map_err(|e| format!("failed to run launchctl kickstart: {}", e))?;
+    if !status.success() {
+        return Err(format!("launchctl kickstart failed with status {}", status));
+    }
+    eprintln!("  Service restarted → {}\n", version);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn parse_launchctl_program(stdout: &[u8]) -> Result<String, String> {
+    std::str::from_utf8(stdout)
+        .map_err(|e| format!("launchctl print: invalid utf-8: {}", e))?
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("program = ").map(str::to_string))
+        .ok_or_else(|| "launchctl print: 'program' line not found".to_string())
 }
 
 /// Show the service status.
@@ -2106,6 +2127,23 @@ fn untrust_ca_windows() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_launchctl_program_extracts_path() {
+        let sample = b"system/com.numa.dns = {\n\tactive count = 1\n\tpath = /Library/LaunchDaemons/com.numa.dns.plist\n\ttype = LaunchDaemon\n\tstate = running\n\n\tprogram = /Users/rd/projects/dns_fun/target/release/numa\n\targuments = {\n";
+        assert_eq!(
+            parse_launchctl_program(sample).unwrap(),
+            "/Users/rd/projects/dns_fun/target/release/numa"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_launchctl_program_errors_when_missing() {
+        let sample = b"system/com.numa.dns = {\n\tactive count = 1\n}";
+        assert!(parse_launchctl_program(sample).is_err());
+    }
 
     #[test]
     fn parse_powershell_servers() {
