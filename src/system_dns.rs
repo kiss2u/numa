@@ -1407,47 +1407,15 @@ pub fn uninstall_service() -> Result<(), String> {
 
 /// Restart the service (kill process, launchd/systemd auto-restarts with new binary).
 pub fn restart_service() -> Result<(), String> {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let exe_path =
-        std::env::current_exe().map_err(|e| format!("failed to get current exe: {}", e))?;
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let version = {
-        match std::process::Command::new(&exe_path)
-            .arg("--version")
-            .output()
-        {
-            Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
-            Err(_) => "unknown".to_string(),
-        }
-    };
-
     #[cfg(target_os = "macos")]
     {
-        let exe_path = exe_path.to_string_lossy();
-        let output = std::process::Command::new("launchctl")
-            .args(["print", PLIST_SYSTEM_TARGET])
-            .output();
-        match output {
-            Ok(o) if o.status.success() => {
-                eprintln!("  Tip: use 'make deploy' instead — handles codesign + restart.\n");
-                // Codesign, then kill service. Launchd KeepAlive respawns it.
-                // This will kill us too (we ARE /usr/local/bin/numa), so
-                // codesign and print output first.
-                let _ = std::process::Command::new("codesign")
-                    .args(["-f", "-s", "-", &exe_path])
-                    .output(); // use output() to suppress codesign stderr
-                eprintln!("  Service restarting → {}\n", version);
-                let _ = std::process::Command::new("pkill")
-                    .args(["-f", &exe_path])
-                    .status();
-                Ok(())
-            }
-            _ => Err("Service is not installed. Run 'sudo numa service start' first.".to_string()),
-        }
+        restart_service_macos()
     }
     #[cfg(target_os = "linux")]
     {
+        let exe_path =
+            std::env::current_exe().map_err(|e| format!("failed to get current exe: {}", e))?;
+        let version = binary_version(&exe_path);
         run_systemctl(&["restart", "numa"])?;
         eprintln!("  Service restarted → {}\n", version);
         Ok(())
@@ -1463,6 +1431,78 @@ pub fn restart_service() -> Result<(), String> {
     {
         Err("service restart not supported on this OS".to_string())
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn binary_version(exe_path: &std::path::Path) -> String {
+    match std::process::Command::new(exe_path)
+        .arg("--version")
+        .output()
+    {
+        Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        Err(_) => "unknown".to_string(),
+    }
+}
+
+/// Restart the macOS daemon by label using `launchctl kickstart -k`. Decoupled
+/// from the CLI's `current_exe()` — the daemon's actual binary path lives in
+/// the plist's `ProgramArguments[0]`, which may differ from where the CLI is
+/// installed (e.g. dev-checkout install vs `/usr/local/bin/numa`). Pre-restart
+/// codesign targets that plist path so the bytes launchd re-exec's are signed.
+#[cfg(target_os = "macos")]
+fn restart_service_macos() -> Result<(), String> {
+    let print = std::process::Command::new("launchctl")
+        .args(["print", PLIST_SYSTEM_TARGET])
+        .output();
+    match print {
+        Ok(o) if o.status.success() => {}
+        _ => {
+            return Err(
+                "Service is not installed. Run 'sudo numa service start' first.".to_string(),
+            );
+        }
+    }
+
+    eprintln!("  Tip: use 'make deploy' instead — handles codesign + restart.\n");
+
+    let plist_exe = plist_program_path()?;
+    let version = binary_version(std::path::Path::new(&plist_exe));
+    let _ = std::process::Command::new("codesign")
+        .args(["-f", "-s", "-", &plist_exe])
+        .output();
+
+    let status = std::process::Command::new("launchctl")
+        .args(["kickstart", "-k", PLIST_SYSTEM_TARGET])
+        .status()
+        .map_err(|e| format!("failed to run launchctl kickstart: {}", e))?;
+    if !status.success() {
+        return Err(format!("launchctl kickstart failed with status {}", status));
+    }
+    eprintln!("  Service restarted → {}\n", version);
+    Ok(())
+}
+
+/// Read the daemon's binary path from the on-disk plist's `ProgramArguments[0]`
+/// via PlistBuddy (always present on macOS). Authoritative source for what
+/// launchd will re-exec on `kickstart`.
+#[cfg(target_os = "macos")]
+fn plist_program_path() -> Result<String, String> {
+    let out = std::process::Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", "Print :ProgramArguments:0", PLIST_DEST])
+        .output()
+        .map_err(|e| format!("failed to run PlistBuddy: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "could not read ProgramArguments from {}: {}",
+            PLIST_DEST,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() {
+        return Err(format!("empty ProgramArguments[0] in {}", PLIST_DEST));
+    }
+    Ok(path)
 }
 
 /// Show the service status.
