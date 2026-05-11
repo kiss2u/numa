@@ -41,14 +41,16 @@ pub enum Upstream {
 }
 
 impl Upstream {
-    /// IP address to key SRTT tracking on, if the upstream has a stable one.
-    /// `Doh` and `Odoh` route through a URL + connection pool, so there's no
-    /// single IP to track; SRTT is skipped for them.
-    pub fn tracked_ip(&self) -> Option<IpAddr> {
+    /// SRTT key for this upstream: `(IpAddr, UpstreamTransport)`. UDP, TCP,
+    /// and DoT to the same IP get independent EWMAs so transport-specific
+    /// failure (BCP 38 dropping UDP, TLS handshake stalls) does not poison
+    /// the others. `Doh`/`Odoh` route through a URL + connection pool, so
+    /// there is no single IP to track and SRTT is skipped for them.
+    pub fn tracked_key(&self) -> Option<(IpAddr, UpstreamTransport)> {
         match self {
-            Upstream::Udp(addr) | Upstream::Tcp(addr) | Upstream::Dot { addr, .. } => {
-                Some(addr.ip())
-            }
+            Upstream::Udp(addr) => Some((addr.ip(), UpstreamTransport::Udp)),
+            Upstream::Tcp(addr) => Some((addr.ip(), UpstreamTransport::Tcp)),
+            Upstream::Dot { addr, .. } => Some((addr.ip(), UpstreamTransport::Dot)),
             Upstream::Doh { .. } | Upstream::Odoh { .. } => None,
         }
     }
@@ -496,7 +498,10 @@ pub async fn forward_with_failover_raw(
             .iter()
             .enumerate()
             .map(|(i, u)| {
-                let rtt = u.tracked_ip().map(|ip| srtt_read.get(ip)).unwrap_or(0);
+                let rtt = u
+                    .tracked_key()
+                    .map(|(ip, t)| srtt_read.get(ip, t))
+                    .unwrap_or(0);
                 (i, rtt)
             })
             .collect()
@@ -526,15 +531,15 @@ pub async fn forward_with_failover_raw(
         };
         match result {
             Ok(resp) => {
-                if let Some(ip) = upstream.tracked_ip() {
+                if let Some((ip, t)) = upstream.tracked_key() {
                     let rtt_ms = start.elapsed().as_millis() as u64;
-                    srtt.write().unwrap().record_rtt(ip, rtt_ms, false);
+                    srtt.write().unwrap().record_rtt(ip, t, rtt_ms);
                 }
                 return Ok(resp);
             }
             Err(e) => {
-                if let Some(ip) = upstream.tracked_ip() {
-                    srtt.write().unwrap().record_failure(ip);
+                if let Some((ip, t)) = upstream.tracked_key() {
+                    srtt.write().unwrap().record_failure(ip, t);
                 }
                 log::debug!("upstream {} failed: {}", upstream, e);
                 last_err = Some(e);
@@ -833,7 +838,9 @@ mod tests {
         );
 
         let srtt = RwLock::new(SrttCache::new(true));
-        srtt.write().unwrap().record_failure(bad_udp_addr.ip());
+        srtt.write()
+            .unwrap()
+            .record_failure(bad_udp_addr.ip(), UpstreamTransport::Udp);
 
         let wire = to_wire(&query);
         let start = Instant::now();
@@ -867,7 +874,9 @@ mod tests {
         let bad_udp_addr: SocketAddr = "192.0.2.99:53".parse().unwrap();
         let pool = UpstreamPool::new(vec![Upstream::Udp(bad_udp_addr)], vec![]);
         let srtt = RwLock::new(SrttCache::new(true));
-        srtt.write().unwrap().record_failure(bad_udp_addr.ip());
+        srtt.write()
+            .unwrap()
+            .record_failure(bad_udp_addr.ip(), UpstreamTransport::Udp);
 
         let result = forward_with_failover_raw(
             &[0u8; 12],
@@ -979,7 +988,10 @@ mod tests {
             Duration::ZERO,
         )
         .await;
-        assert!(srtt.read().unwrap().is_known(blackhole.ip()));
+        assert!(srtt
+            .read()
+            .unwrap()
+            .is_known(blackhole.ip(), UpstreamTransport::Udp));
     }
 
     #[tokio::test]
@@ -1012,7 +1024,7 @@ mod tests {
         )
         .await;
         let cache = srtt.read().unwrap();
-        assert!(cache.is_known(dead1.ip()));
-        assert!(cache.is_known(dead2.ip()));
+        assert!(cache.is_known(dead1.ip(), UpstreamTransport::Dot));
+        assert!(cache.is_known(dead2.ip(), UpstreamTransport::Dot));
     }
 }
