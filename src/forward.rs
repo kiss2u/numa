@@ -41,18 +41,14 @@ pub enum Upstream {
 }
 
 impl Upstream {
-    /// SRTT key for this upstream: `(IpAddr, UpstreamTransport)`. UDP, TCP,
-    /// and DoT to the same IP get independent EWMAs so transport-specific
-    /// failure (BCP 38 dropping UDP, TLS handshake stalls) does not poison
-    /// the others. `Doh`/`Odoh` route through a URL + connection pool, so
-    /// there is no single IP to track and SRTT is skipped for them.
+    /// SRTT key, when the upstream has a stable IP. `Doh`/`Odoh` route
+    /// through a URL + connection pool, so they never key here.
     pub fn tracked_key(&self) -> Option<(IpAddr, UpstreamTransport)> {
-        match self {
-            Upstream::Udp(addr) => Some((addr.ip(), UpstreamTransport::Udp)),
-            Upstream::Tcp(addr) => Some((addr.ip(), UpstreamTransport::Tcp)),
-            Upstream::Dot { addr, .. } => Some((addr.ip(), UpstreamTransport::Dot)),
-            Upstream::Doh { .. } | Upstream::Odoh { .. } => None,
-        }
+        let ip = match self {
+            Upstream::Udp(a) | Upstream::Tcp(a) | Upstream::Dot { addr: a, .. } => a.ip(),
+            Upstream::Doh { .. } | Upstream::Odoh { .. } => return None,
+        };
+        Some((ip, self.transport()))
     }
 
     pub fn transport(&self) -> UpstreamTransport {

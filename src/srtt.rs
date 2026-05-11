@@ -19,20 +19,16 @@ const EVICT_BATCH: usize = 64;
 /// networks the UDP timeout is taken at most once per decay window.
 pub const PRIMARY_SKIP_SRTT_MS: u64 = 4000;
 
-/// SRTT key: an IP plus the wire transport. Plain UDP and plain TCP to the
-/// same resolver get independent EWMAs so a UDP-hostile path (BCP 38) does
-/// not poison TCP's score and vice versa. DoT keys separately so TLS
-/// failures stay isolated from plain TCP. DoH/ODoH never key here — they
-/// route through a URL+pool, not a single IP.
-type SrttKey = (IpAddr, UpstreamTransport);
-
 struct SrttEntry {
     srtt_ms: u64,
     updated_at: Instant,
 }
 
+/// Per-(ip, transport) EWMA so a UDP-hostile path (BCP 38) doesn't poison
+/// TCP's score on the same IP, and DoT TLS failures stay isolated from
+/// plain TCP. DoH/ODoH route through a URL+pool, never key here.
 pub struct SrttCache {
-    entries: HashMap<SrttKey, SrttEntry>,
+    entries: HashMap<(IpAddr, UpstreamTransport), SrttEntry>,
     enabled: bool,
 }
 
@@ -117,9 +113,7 @@ impl SrttCache {
         entry.updated_at = Instant::now();
     }
 
-    /// Sort UDP-context addresses by SRTT ascending (lowest/fastest first).
-    /// Recursive resolution always speaks UDP first to authoritatives, so a
-    /// dedicated UDP helper keeps the call sites free of transport literals.
+    /// Sort by UDP SRTT ascending (lowest/fastest first). No-op when disabled.
     pub fn sort_by_udp_rtt(&self, addrs: &mut [SocketAddr]) {
         if !self.enabled {
             return;
@@ -129,7 +123,7 @@ impl SrttCache {
 
     pub fn heap_bytes(&self) -> usize {
         let per_slot = std::mem::size_of::<u64>()
-            + std::mem::size_of::<SrttKey>()
+            + std::mem::size_of::<(IpAddr, UpstreamTransport)>()
             + std::mem::size_of::<SrttEntry>()
             + 1;
         self.entries.capacity() * per_slot
@@ -148,7 +142,7 @@ impl SrttCache {
             return;
         }
         // Batch eviction: remove the oldest EVICT_BATCH entries at once
-        let mut by_age: Vec<SrttKey> = self.entries.keys().copied().collect();
+        let mut by_age: Vec<_> = self.entries.keys().copied().collect();
         by_age.sort_by_key(|k| self.entries[k].updated_at);
         for k in by_age.into_iter().take(EVICT_BATCH) {
             self.entries.remove(&k);
@@ -198,11 +192,7 @@ mod tests {
 
     #[test]
     fn udp_and_tcp_are_independent() {
-        // A flooded UDP path (5000ms penalty) must not drag down the TCP
-        // EWMA for the same IP. This is the bug the keying refactor fixes:
-        // on UDP-hostile networks (BCP 38), repeated UDP failures used to
-        // poison the shared SRTT entry, causing TCP fallback successes to
-        // re-arm UDP probing every ~3 queries.
+        // UDP penalty must not bleed into the TCP EWMA on the same IP.
         let mut cache = SrttCache::new(true);
         cache.record_failure(ip(1), UDP);
         for _ in 0..20 {
