@@ -1913,4 +1913,116 @@ mod tests {
         assert_eq!(response.answers.len(), 1);
         assert!(matches!(response.answers[0], DnsRecord::A { .. }));
     }
+
+    // ---- Full-pipeline wiring tests for shape_response_for_client ----
+    // The unit tests above verify the helper's invariants in isolation; these
+    // verify the helper is actually wired into resolve_query and that the
+    // invariants survive serialize -> reparse on the wire.
+
+    #[tokio::test]
+    async fn pipeline_clears_aa_bit_from_forwarded_response() {
+        // #192: even when upstream sets aa=1, the client must see aa=0.
+        let mut upstream_resp = DnsPacket::new();
+        upstream_resp.header.response = true;
+        upstream_resp.header.rescode = ResultCode::NOERROR;
+        upstream_resp.header.authoritative_answer = true;
+        upstream_resp.answers.push(DnsRecord::A {
+            domain: "aa.test".into(),
+            addr: Ipv4Addr::new(1, 2, 3, 4),
+            ttl: 60,
+        });
+        let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "aa.test".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
+        )];
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "aa.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Forwarded);
+        assert!(
+            !resp.header.authoritative_answer,
+            "aa bit must be cleared even when upstream set it"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_drops_opt_when_client_sent_none() {
+        // #193 / RFC 6891 §6.1.1: client sent no OPT -> response must have none,
+        // even if upstream included one.
+        let mut upstream_resp = DnsPacket::new();
+        upstream_resp.header.response = true;
+        upstream_resp.header.rescode = ResultCode::NOERROR;
+        upstream_resp.edns = Some(crate::packet::EdnsOpt {
+            udp_payload_size: 4096,
+            options: ede_opt_bytes(22),
+            ..Default::default()
+        });
+        upstream_resp.answers.push(DnsRecord::A {
+            domain: "noedns.test".into(),
+            addr: Ipv4Addr::new(1, 2, 3, 4),
+            ttl: 60,
+        });
+        let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "noedns.test".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
+        )];
+        let ctx = Arc::new(ctx);
+
+        // resolve_in_test builds a query without EDNS.
+        let (resp, _) = resolve_in_test(&ctx, "noedns.test", QueryType::A).await;
+        assert!(
+            resp.edns.is_none(),
+            "client sent no OPT, response must omit OPT"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_preserves_upstream_ede_for_edns_client() {
+        // #136 angle: when the client opts into EDNS, upstream's EDE option
+        // must survive the full pipeline (serialize -> reparse) so debuggers
+        // and validators see *why* a response is empty.
+        let ede = ede_opt_bytes(22); // 22 = "No Reachable Authority"
+        let mut upstream_resp = DnsPacket::new();
+        upstream_resp.header.response = true;
+        upstream_resp.header.rescode = ResultCode::NOERROR;
+        upstream_resp.edns = Some(crate::packet::EdnsOpt {
+            udp_payload_size: 1232,
+            options: ede.clone(),
+            ..Default::default()
+        });
+        let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "ede.test".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
+        )];
+        let ctx = Arc::new(ctx);
+
+        // Build a query *with* EDNS so the response mirror keeps the OPT.
+        let mut query = DnsPacket::query(0xBEEF, "ede.test", QueryType::A);
+        query.edns = Some(crate::packet::EdnsOpt::default());
+        let mut buf = BytePacketBuffer::new();
+        query.write(&mut buf).unwrap();
+        let raw = &buf.buf[..buf.pos];
+        let src: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+
+        let (resp_buf, _) = resolve_query(query, raw, src, &ctx, Transport::Udp)
+            .await
+            .unwrap();
+        let mut parse = BytePacketBuffer::from_bytes(resp_buf.filled());
+        let resp = DnsPacket::from_buffer(&mut parse).unwrap();
+
+        let edns = resp.edns.expect("OPT must reach the client");
+        assert_eq!(
+            edns.options, ede,
+            "EDE option bytes must survive serialize -> reparse"
+        );
+    }
 }
