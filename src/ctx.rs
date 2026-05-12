@@ -194,18 +194,9 @@ pub async fn resolve_query(
         response.resources.len(),
     );
 
-    // Serialize response
     // TODO: TC bit is UDP-specific; DoT connections could carry up to 65535 bytes.
     // Once BytePacketBuffer supports larger buffers, skip truncation for TCP/TLS.
-    let mut resp_buffer = BytePacketBuffer::new();
-    if response.write(&mut resp_buffer).is_err() {
-        // Response too large — set TC bit and send header + question only
-        debug!("response too large, setting TC bit for {}", qname);
-        let mut tc_response = DnsPacket::response_from(&query, response.header.rescode);
-        tc_response.header.truncated_message = true;
-        resp_buffer = BytePacketBuffer::new();
-        tc_response.write(&mut resp_buffer)?;
-    }
+    let resp_buffer = serialize_with_fallback(&mut response, &query, &qname)?;
 
     // Record stats and query log
     {
@@ -229,6 +220,36 @@ pub async fn resolve_query(
     });
 
     Ok((resp_buffer, path))
+}
+
+/// Wire-encode `response`: buffer-full → TC bit, serializer-rejected → SERVFAIL.
+/// Mutates `response.header.rescode` on SERVFAIL so the caller's query log
+/// reflects the truth (see #142).
+fn serialize_with_fallback(
+    response: &mut DnsPacket,
+    query: &DnsPacket,
+    qname: &str,
+) -> crate::Result<BytePacketBuffer> {
+    let mut buf = BytePacketBuffer::new();
+    match response.write(&mut buf) {
+        Ok(()) => Ok(buf),
+        Err(_) if buf.overflowed() => {
+            debug!("response too large, setting TC bit for {}", qname);
+            let mut tc = DnsPacket::response_from(query, response.header.rescode);
+            tc.header.truncated_message = true;
+            let mut out = BytePacketBuffer::new();
+            tc.write(&mut out)?;
+            Ok(out)
+        }
+        Err(e) => {
+            warn!("response serialize error for {}: {}", qname, e);
+            response.header.rescode = ResultCode::SERVFAIL;
+            let servfail = DnsPacket::response_from(query, ResultCode::SERVFAIL);
+            let mut out = BytePacketBuffer::new();
+            servfail.write(&mut out)?;
+            Ok(out)
+        }
+    }
 }
 
 /// Local resolution pipeline: overrides, .localhost, zones, special-use, .numa
@@ -1757,6 +1778,69 @@ mod tests {
             DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(10, 0, 0, 7)),
             other => panic!("expected A record, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn serialize_with_fallback_passes_through_valid_response() {
+        let query = DnsPacket::query(0x1234, "example.com", QueryType::A);
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        response.answers.push(DnsRecord::A {
+            domain: "example.com".into(),
+            addr: Ipv4Addr::new(192, 0, 2, 1),
+            ttl: 300,
+        });
+        let buf = serialize_with_fallback(&mut response, &query, "example.com").unwrap();
+        let parsed =
+            DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(buf.filled())).unwrap();
+        assert_eq!(parsed.header.rescode, ResultCode::NOERROR);
+        assert!(!parsed.header.truncated_message);
+        assert_eq!(parsed.answers.len(), 1);
+    }
+
+    #[test]
+    fn serialize_with_fallback_sets_tc_on_buffer_overflow() {
+        // 4096-byte buffer / ~24 bytes per TXT-as-UNKNOWN record → ~170+ fills it.
+        let query = DnsPacket::query(0x1234, "example.com", QueryType::TXT);
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        for _ in 0..256 {
+            response.answers.push(DnsRecord::UNKNOWN {
+                domain: "example.com".into(),
+                qtype: QueryType::TXT.to_num(),
+                data: vec![0u8; 32],
+                ttl: 300,
+            });
+        }
+        let buf = serialize_with_fallback(&mut response, &query, "example.com").unwrap();
+        let parsed =
+            DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(buf.filled())).unwrap();
+        assert!(parsed.header.truncated_message, "TC bit must be set");
+        assert_eq!(parsed.header.rescode, ResultCode::NOERROR);
+    }
+
+    #[test]
+    fn serialize_with_fallback_returns_servfail_for_malformed_label() {
+        // A >63-byte raw label reaches write_qname → reject as SERVFAIL,
+        // not TC (TC would send the client to TCP for the same failure). #142.
+        let query = DnsPacket::query(0x1234, "example.com", QueryType::A);
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        response.answers.push(DnsRecord::A {
+            domain: format!("{}.example.com", "a".repeat(64)),
+            addr: Ipv4Addr::new(192, 0, 2, 1),
+            ttl: 300,
+        });
+        let buf = serialize_with_fallback(&mut response, &query, "example.com").unwrap();
+        let parsed =
+            DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(buf.filled())).unwrap();
+        assert_eq!(parsed.header.rescode, ResultCode::SERVFAIL);
+        assert!(
+            !parsed.header.truncated_message,
+            "must not set TC for parse errors"
+        );
+        assert_eq!(
+            response.header.rescode,
+            ResultCode::SERVFAIL,
+            "caller-visible rescode must reflect SERVFAIL for query logging"
+        );
     }
 
     /// #188: cache entries synthesized internally (e.g. NS delegation snapshots)
