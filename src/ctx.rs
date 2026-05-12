@@ -1190,7 +1190,15 @@ mod tests {
         domain: &str,
         qtype: QueryType,
     ) -> (DnsPacket, QueryPath) {
-        let query = DnsPacket::query(0xBEEF, domain, qtype);
+        resolve_in_test_with_query(ctx, DnsPacket::query(0xBEEF, domain, qtype)).await
+    }
+
+    /// Variant of `resolve_in_test` that takes a pre-built query, for tests
+    /// that need to set EDNS or other non-default header bits on the request.
+    async fn resolve_in_test_with_query(
+        ctx: &Arc<ServerCtx>,
+        query: DnsPacket,
+    ) -> (DnsPacket, QueryPath) {
         let mut buf = BytePacketBuffer::new();
         query.write(&mut buf).unwrap();
         let raw = &buf.buf[..buf.pos];
@@ -1922,15 +1930,9 @@ mod tests {
     #[tokio::test]
     async fn pipeline_clears_aa_bit_from_forwarded_response() {
         // #192: even when upstream sets aa=1, the client must see aa=0.
-        let mut upstream_resp = DnsPacket::new();
-        upstream_resp.header.response = true;
-        upstream_resp.header.rescode = ResultCode::NOERROR;
+        let mut upstream_resp =
+            crate::testutil::a_record_response("aa.test", Ipv4Addr::new(1, 2, 3, 4), 60);
         upstream_resp.header.authoritative_answer = true;
-        upstream_resp.answers.push(DnsRecord::A {
-            domain: "aa.test".into(),
-            addr: Ipv4Addr::new(1, 2, 3, 4),
-            ttl: 60,
-        });
         let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
 
         let mut ctx = crate::testutil::test_ctx().await;
@@ -1952,18 +1954,12 @@ mod tests {
     async fn pipeline_drops_opt_when_client_sent_none() {
         // #193 / RFC 6891 §6.1.1: client sent no OPT -> response must have none,
         // even if upstream included one.
-        let mut upstream_resp = DnsPacket::new();
-        upstream_resp.header.response = true;
-        upstream_resp.header.rescode = ResultCode::NOERROR;
+        let mut upstream_resp =
+            crate::testutil::a_record_response("noedns.test", Ipv4Addr::new(1, 2, 3, 4), 60);
         upstream_resp.edns = Some(crate::packet::EdnsOpt {
             udp_payload_size: 4096,
             options: ede_opt_bytes(22),
             ..Default::default()
-        });
-        upstream_resp.answers.push(DnsRecord::A {
-            domain: "noedns.test".into(),
-            addr: Ipv4Addr::new(1, 2, 3, 4),
-            ttl: 60,
         });
         let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
 
@@ -1974,7 +1970,6 @@ mod tests {
         )];
         let ctx = Arc::new(ctx);
 
-        // resolve_in_test builds a query without EDNS.
         let (resp, _) = resolve_in_test(&ctx, "noedns.test", QueryType::A).await;
         assert!(
             resp.edns.is_none(),
@@ -2005,19 +2000,9 @@ mod tests {
         )];
         let ctx = Arc::new(ctx);
 
-        // Build a query *with* EDNS so the response mirror keeps the OPT.
         let mut query = DnsPacket::query(0xBEEF, "ede.test", QueryType::A);
         query.edns = Some(crate::packet::EdnsOpt::default());
-        let mut buf = BytePacketBuffer::new();
-        query.write(&mut buf).unwrap();
-        let raw = &buf.buf[..buf.pos];
-        let src: SocketAddr = "127.0.0.1:1234".parse().unwrap();
-
-        let (resp_buf, _) = resolve_query(query, raw, src, &ctx, Transport::Udp)
-            .await
-            .unwrap();
-        let mut parse = BytePacketBuffer::from_bytes(resp_buf.filled());
-        let resp = DnsPacket::from_buffer(&mut parse).unwrap();
+        let (resp, _) = resolve_in_test_with_query(&ctx, query).await;
 
         let edns = resp.edns.expect("OPT must reach the client");
         assert_eq!(
