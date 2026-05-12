@@ -1193,8 +1193,6 @@ mod tests {
         resolve_in_test_with_query(ctx, DnsPacket::query(0xBEEF, domain, qtype)).await
     }
 
-    /// Variant of `resolve_in_test` that takes a pre-built query, for tests
-    /// that need to set EDNS or other non-default header bits on the request.
     async fn resolve_in_test_with_query(
         ctx: &Arc<ServerCtx>,
         query: DnsPacket,
@@ -1922,10 +1920,7 @@ mod tests {
         assert!(matches!(response.answers[0], DnsRecord::A { .. }));
     }
 
-    // ---- Full-pipeline wiring tests for shape_response_for_client ----
-    // The unit tests above verify the helper's invariants in isolation; these
-    // verify the helper is actually wired into resolve_query and that the
-    // invariants survive serialize -> reparse on the wire.
+    // ---- Wiring tests: shape_response_for_client must be called by resolve_query ----
 
     #[tokio::test]
     async fn pipeline_clears_aa_bit_from_forwarded_response() {
@@ -1956,11 +1951,7 @@ mod tests {
         // even if upstream included one.
         let mut upstream_resp =
             crate::testutil::a_record_response("noedns.test", Ipv4Addr::new(1, 2, 3, 4), 60);
-        upstream_resp.edns = Some(crate::packet::EdnsOpt {
-            udp_payload_size: 4096,
-            options: ede_opt_bytes(22),
-            ..Default::default()
-        });
+        upstream_resp.edns = Some(crate::packet::EdnsOpt::default());
         let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
 
         let mut ctx = crate::testutil::test_ctx().await;
@@ -1987,7 +1978,6 @@ mod tests {
         upstream_resp.header.response = true;
         upstream_resp.header.rescode = ResultCode::NOERROR;
         upstream_resp.edns = Some(crate::packet::EdnsOpt {
-            udp_payload_size: 1232,
             options: ede.clone(),
             ..Default::default()
         });
