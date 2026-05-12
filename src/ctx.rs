@@ -310,7 +310,6 @@ fn resolve_proxy_tld(
     let service_name = qname.strip_suffix(&ctx.proxy_tld_suffix).unwrap_or(qname);
     let is_remote = !src_addr.ip().is_loopback();
 
-    // Locally-registered service → loopback (local) or our LAN IP (remote).
     if ctx.services.lock().unwrap().lookup(service_name).is_some() {
         let v4 = if is_remote {
             *ctx.lan_ip.lock().unwrap()
@@ -328,38 +327,24 @@ fn resolve_proxy_tld(
         return (resp, QueryPath::Local, DnssecStatus::Indeterminate);
     }
 
-    // LAN peer learned via discovery → return its actual address natively.
     if let Some((ip, _)) = ctx.lan_peers.lock().unwrap().lookup(service_name) {
         let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
         match (qtype, ip) {
-            (QueryType::AAAA, std::net::IpAddr::V6(v6)) => {
-                resp.answers.push(DnsRecord::AAAA {
-                    domain: qname.to_string(),
-                    addr: v6,
-                    ttl: 300,
-                });
-            }
-            (QueryType::AAAA, std::net::IpAddr::V4(v4)) => {
-                resp.answers.push(DnsRecord::AAAA {
-                    domain: qname.to_string(),
-                    addr: v4.to_ipv6_mapped(),
-                    ttl: 300,
-                });
-            }
+            (QueryType::AAAA, std::net::IpAddr::V6(v6)) => resp.answers.push(DnsRecord::AAAA {
+                domain: qname.to_string(),
+                addr: v6,
+                ttl: 300,
+            }),
             (_, std::net::IpAddr::V4(v4)) => {
-                resp.answers.push(DnsRecord::A {
-                    domain: qname.to_string(),
-                    addr: v4,
-                    ttl: 300,
-                });
+                resp.answers
+                    .push(sinkhole_record(qname, qtype, v4, v4.to_ipv6_mapped(), 300))
             }
-            // A/other-qtype query on a v6-only peer → NODATA (NOERROR, empty).
+            // Non-AAAA query on a v6-only peer → NODATA (NOERROR, empty) per RFC 2308.
             (_, std::net::IpAddr::V6(_)) => {}
         }
         return (resp, QueryPath::Local, DnssecStatus::Indeterminate);
     }
 
-    // Unknown name in the proxy TLD → NXDOMAIN.
     let resp = DnsPacket::response_from(query, ResultCode::NXDOMAIN);
     (resp, QueryPath::Local, DnssecStatus::Indeterminate)
 }
