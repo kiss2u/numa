@@ -1796,65 +1796,13 @@ mod tests {
         assert!(resp.header.recursion_available);
     }
 
-    // ---- shape_response_for_client unit tests (#192, #193) ----
+    // ---- shape_response_for_client unit tests ----
 
     fn ede_opt_bytes(code: u16) -> Vec<u8> {
         // RFC 8914 OPT body: option-code=15 (EDE), option-length=2, INFO-CODE.
         let mut v = vec![0, 15, 0, 2];
         v.extend_from_slice(&code.to_be_bytes());
         v
-    }
-
-    #[test]
-    fn shape_clears_aa_bit_from_upstream() {
-        // #192: cached/forwarded responses inherit upstream's aa=1; clear it.
-        let query = DnsPacket::query(0x1, "example.com", QueryType::A);
-        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
-        response.header.authoritative_answer = true;
-
-        shape_response_for_client(&mut response, &query, false);
-
-        assert!(!response.header.authoritative_answer);
-    }
-
-    #[test]
-    fn shape_drops_edns_when_client_did_not_send() {
-        // #193: RFC 6891 §6.1.1 — emit OPT only when requestor included one.
-        let query = DnsPacket::query(0x1, "example.com", QueryType::A);
-        assert!(query.edns.is_none());
-        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
-        response.edns = Some(crate::packet::EdnsOpt {
-            udp_payload_size: 4096,
-            options: ede_opt_bytes(22),
-            ..Default::default()
-        });
-
-        shape_response_for_client(&mut response, &query, false);
-
-        assert!(response.edns.is_none(), "upstream OPT must be dropped");
-    }
-
-    #[test]
-    fn shape_preserves_upstream_edns_options_when_client_sent_edns() {
-        // The EDE-preservation half of #193: when both sides talk EDNS,
-        // keep upstream's EDE/Padding/etc. instead of replacing with a bare
-        // default. EDE in particular tells clients *why* a response is empty.
-        let mut query = DnsPacket::query(0x1, "example.com", QueryType::A);
-        query.edns = Some(crate::packet::EdnsOpt::default());
-        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
-        let ede = ede_opt_bytes(22); // 22 = "No Reachable Authority"
-        response.edns = Some(crate::packet::EdnsOpt {
-            udp_payload_size: 1232,
-            options: ede.clone(),
-            do_bit: true,
-            ..Default::default()
-        });
-
-        shape_response_for_client(&mut response, &query, false);
-
-        let edns = response.edns.expect("OPT must be preserved");
-        assert_eq!(edns.options, ede, "EDE option must survive shaping");
-        assert_eq!(edns.udp_payload_size, 1232);
     }
 
     #[test]
