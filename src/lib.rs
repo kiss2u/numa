@@ -144,11 +144,10 @@ fn config_dir_unix() -> std::path::PathBuf {
     daemon_data_dir()
 }
 
-/// Default config path the CLI reads/writes for toggles like `numa lan on`
-/// and the daemon loads when no path is passed. On Windows this matches the
-/// path SCM uses, so toggling from any directory updates the file the
-/// service actually reads (issue #202). On Unix it stays CWD-relative —
-/// systemd/launchd run the daemon with a known WorkingDirectory.
+/// Default config path for CLI toggles (`numa lan on`, etc.) and the
+/// Windows service entry. On Windows this matches the SCM's data dir
+/// so toggles update the file the service reads (issue #202). Unix
+/// callers still use the CWD-relative literal `"numa.toml"`.
 pub fn cli_config_path() -> String {
     #[cfg(windows)]
     {

@@ -186,10 +186,11 @@ fn set_config_bool(
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if let Some(parent) = std::path::Path::new(path).parent() {
-                if !parent.as_os_str().is_empty() {
-                    std::fs::create_dir_all(parent)?;
-                }
+            if let Some(parent) = std::path::Path::new(path)
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent)?;
             }
             std::fs::write(path, format!("[{}]\n{} = {}\n", section, key, value))?;
             print_toggle_status(feature_name, value, path);
@@ -254,10 +255,7 @@ fn print_toggle_status(feature: &str, enabled: bool, path: &str) {
         "\x1b[1;38;2;192;98;58mNuma\x1b[0m — {} \x1b[{}m{}\x1b[0m",
         feature, color, label
     );
-    let display = std::fs::canonicalize(path)
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| path.to_string());
-    eprintln!("  Wrote {}", display);
+    eprintln!("  Wrote {}", path);
     if enabled {
         eprintln!("  Restart Numa for changes to take effect");
     }
@@ -287,8 +285,7 @@ mod tests {
 
     #[test]
     fn test_update_config_inserts_into_existing_later_section() {
-        // [blocking] appears before [lan]; [lan] exists but lacks `enabled`.
-        // The new key should land inside [lan], not at EOF or inside [blocking].
+        // New key must land inside [lan], not at EOF or inside [blocking].
         let input = "[blocking]\nenabled = false\n\n[lan]\nfoo = 1\n";
         let output = update_config_content(input, "lan", "enabled", true);
         assert!(output.contains("[lan]\nenabled = true\nfoo = 1"));
