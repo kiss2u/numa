@@ -125,7 +125,17 @@ fn default_api_bind_addr() -> String {
 }
 
 fn default_bind_addr() -> String {
-    "0.0.0.0:53".to_string()
+    // Windows: Dnscache owns 127.0.0.1:53, so numa lives on 127.0.0.2 and
+    // an NRPT rule routes queries through Dnscache → numa. Other platforms
+    // bind 0.0.0.0:53 — the install path frees port 53 for them.
+    #[cfg(windows)]
+    {
+        "127.0.0.2:53".to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        "0.0.0.0:53".to_string()
+    }
 }
 
 pub const DEFAULT_API_PORT: u16 = 5380;
