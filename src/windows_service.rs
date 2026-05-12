@@ -83,8 +83,6 @@ fn run_service() -> windows_service::Result<()> {
         let _ = server_done_tx.send(());
     });
 
-    // No system-DNS redirect here — the NRPT rule installed at `numa install`
-    // time routes Dnscache → numa transparently, and survives service restarts.
     // Wait for either SCM stop or server termination.
     loop {
         if shutdown_rx.recv_timeout(Duration::from_millis(500)).is_ok() {

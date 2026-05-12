@@ -487,29 +487,6 @@ fn discover_windows() -> SystemDnsInfo {
     }
 }
 
-// --- Windows: NRPT coexistence helpers ---
-//
-// Numa coexists with Dnscache rather than fighting it. Dnscache continues to
-// own 127.0.0.1:53; numa binds 127.0.0.2:53; an NRPT rule (Namespace `.` →
-// NameServers 127.0.0.2) routes every query Dnscache sees through numa. This
-// avoids the Dnscache → WinHttpAutoProxySvc → Wcmsvc → WlanSvc cascade that
-// disabling Dnscache (the prior approach) triggered on Windows 11.
-
-#[cfg(windows)]
-const NUMA_LOOPBACK_IP: &str = "127.0.0.2";
-
-/// Path where the pre-2026 install layout wrote its adapter-DNS backup.
-/// Kept as a constant only so the migration shim can locate and clean it up.
-#[cfg(windows)]
-fn legacy_backup_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(
-        std::env::var("PROGRAMDATA").unwrap_or_else(|_| "C:\\ProgramData".into()),
-    )
-    .join("numa")
-    .join("original-dns.json")
-}
-
-/// Invoke PowerShell with a script body. Used for NRPT rule management.
 #[cfg(windows)]
 fn run_powershell(script: &str, what: &str) -> Result<(), String> {
     let out = std::process::Command::new("powershell")
@@ -533,7 +510,6 @@ fn run_powershell(script: &str, what: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Install an NRPT rule routing all DNS (`Namespace .`) through numa.
 /// Idempotent: any prior rule pointing at our loopback IP is removed first.
 #[cfg(windows)]
 fn install_nrpt_rule() -> Result<(), String> {
@@ -544,12 +520,12 @@ Get-DnsClientNrptRule | Where-Object {{ $_.NameServers -contains '{ip}' }} |
     ForEach-Object {{ Remove-DnsClientNrptRule -Name $_.Name -Force }}
 Add-DnsClientNrptRule -Namespace '.' -NameServers '{ip}' | Out-Null
 "#,
-        ip = NUMA_LOOPBACK_IP
+        ip = crate::config::NUMA_LOOPBACK_IP
     );
     run_powershell(&script, "install NRPT rule")
 }
 
-/// Remove any NRPT rule pointing at numa. Best-effort; never blocks uninstall.
+/// Best-effort: never blocks uninstall.
 #[cfg(windows)]
 fn remove_nrpt_rule() {
     let script = format!(
@@ -558,28 +534,27 @@ $ErrorActionPreference = 'SilentlyContinue'
 Get-DnsClientNrptRule | Where-Object {{ $_.NameServers -contains '{ip}' }} |
     ForEach-Object {{ Remove-DnsClientNrptRule -Name $_.Name -Force }}
 "#,
-        ip = NUMA_LOOPBACK_IP
+        ip = crate::config::NUMA_LOOPBACK_IP
     );
     let _ = run_powershell(&script, "remove NRPT rule");
 }
 
 /// One-shot unwinder for the pre-2026 install layout (Dnscache disabled +
-/// adapter DNS pinned at 127.0.0.1). No-op on fresh installs and idempotent
-/// across repeats. Resets each adapter listed in the legacy backup to DHCP
-/// by friendly name — netsh accepts names for adapters that aren't Up, so
-/// this recovers a Wi-Fi adapter even when the Dnscache-disable cascade has
-/// hidden it from `Get-NetAdapter`.
+/// adapter DNS pinned at 127.0.0.1). Resets each adapter listed in the legacy
+/// backup to DHCP by friendly name — netsh accepts names for adapters that
+/// aren't Up, so this recovers a Wi-Fi adapter even when the Dnscache-disable
+/// cascade has hidden it from `Get-NetAdapter`.
 #[cfg(windows)]
 fn unwind_legacy_install_if_present() {
-    let backup_path = legacy_backup_path();
-    if !backup_path.exists() {
+    let backup_path = crate::data_dir().join("original-dns.json");
+    let Ok(json) = std::fs::read_to_string(&backup_path) else {
         return;
-    }
+    };
 
     eprintln!("  Unwinding legacy install (adapter-DNS pinning, Dnscache disabled)...");
 
-    // Re-enable Dnscache (registry Start=2 = auto). Order matters — the
-    // Wlansvc/Wcmsvc cascade can't recover until Dnscache is startable.
+    // Re-enable Dnscache (registry Start=2 = auto) before anything else —
+    // the Wlansvc/Wcmsvc cascade can't recover until Dnscache is startable.
     let _ = std::process::Command::new("reg")
         .args([
             "add",
@@ -594,27 +569,21 @@ fn unwind_legacy_install_if_present() {
         ])
         .status();
 
-    // Reset every adapter named in the backup to DHCP-supplied DNS. Static-DNS
-    // users lose their explicit servers and revert to DHCP — acceptable for a
-    // migration path; they can reconfigure post-upgrade.
-    if let Ok(json) = std::fs::read_to_string(&backup_path) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
-            if let Some(obj) = value.as_object() {
-                for name in obj.keys() {
-                    let name_arg = format!("name={}", name);
-                    let _ = std::process::Command::new("netsh")
-                        .args([
-                            "interface",
-                            "ipv4",
-                            "set",
-                            "dnsservers",
-                            &name_arg,
-                            "source=dhcp",
-                        ])
-                        .status();
-                    eprintln!("  reset DNS for \"{}\" -> DHCP", name);
-                }
-            }
+    // Static-DNS users lose their explicit servers and revert to DHCP.
+    if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str(&json) {
+        for name in obj.keys() {
+            let name_arg = format!("name={}", name);
+            let _ = std::process::Command::new("netsh")
+                .args([
+                    "interface",
+                    "ipv4",
+                    "set",
+                    "dnsservers",
+                    &name_arg,
+                    "source=dhcp",
+                ])
+                .status();
+            eprintln!("  reset DNS for \"{}\" -> DHCP", name);
         }
     }
 
@@ -624,14 +593,11 @@ fn unwind_legacy_install_if_present() {
 
 #[cfg(windows)]
 fn install_windows(skip_system_dns: bool) -> Result<(), String> {
-    // Stop the existing service before its binary can be overwritten and
-    // before any NRPT changes take effect.
     if is_service_registered() {
         eprintln!("  Stopping existing service...");
         stop_service_scm();
     }
 
-    // Roll back the pre-2026 install layout if we find a backup file. Idempotent.
     unwind_legacy_install_if_present();
 
     let service_exe = install_service_binary()?;
@@ -641,7 +607,7 @@ fn install_windows(skip_system_dns: bool) -> Result<(), String> {
         install_nrpt_rule()?;
         eprintln!(
             "  NRPT rule installed: all DNS routed through numa ({}).",
-            NUMA_LOOPBACK_IP
+            crate::config::NUMA_LOOPBACK_IP
         );
     }
 
@@ -723,9 +689,8 @@ fn register_service_scm(exe: &std::path::Path) -> Result<(), String> {
     let name = crate::windows_service::SERVICE_NAME;
 
     // sc.exe uses a leading space as its `name= value` delimiter; the space
-    // after `=` is mandatory. `depend= Dnscache` makes SCM start numa only
-    // after the DNS Client service is up — closes the boot-order race that
-    // would otherwise let numa miss the very first queries.
+    // after `=` is mandatory. `depend= Dnscache` closes the boot-order race
+    // where numa starts before the resolver Dnscache routes queries to it.
     let create = run_sc(&[
         "create",
         name,
@@ -861,9 +826,6 @@ fn uninstall_windows() -> Result<(), String> {
     delete_service_scm();
     remove_service_binary();
     remove_nrpt_rule();
-
-    // Defensive: a user could upgrade and then immediately uninstall before
-    // any install ever ran the unwind path. Idempotent no-op if no backup.
     unwind_legacy_install_if_present();
 
     eprintln!("\n  Numa uninstalled. NRPT rule removed; Dnscache unchanged.\n");
