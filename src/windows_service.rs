@@ -61,7 +61,7 @@ fn run_service() -> windows_service::Result<()> {
     // dedicated thread runs the runtime so this function can return cleanly
     // once the SCM tells us to stop — we can't block the dispatcher thread
     // forever without preventing graceful shutdown.
-    let config_path = service_config_path();
+    let config_path = crate::cli_config_path();
     let (server_done_tx, server_done_rx) = mpsc::channel::<()>();
 
     let server_thread = std::thread::spawn(move || {
@@ -117,14 +117,4 @@ fn run_service() -> windows_service::Result<()> {
 /// will hang here waiting for an SCM that isn't talking to them.
 pub fn run_as_service() -> windows_service::Result<()> {
     service_dispatcher::start(SERVICE_NAME, ffi_service_main)
-}
-
-/// Path to the config file used when running under SCM. SCM launches the
-/// service with SYSTEM's working directory (usually `C:\Windows\System32`),
-/// so a relative `numa.toml` lookup won't find anything meaningful.
-fn service_config_path() -> String {
-    crate::data_dir()
-        .join("numa.toml")
-        .to_string_lossy()
-        .into_owned()
 }
