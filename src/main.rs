@@ -94,7 +94,7 @@ fn main() -> numa::Result<()> {
             let sub = std::env::args().nth(2).unwrap_or_default();
             let config_path = std::env::args()
                 .nth(3)
-                .unwrap_or_else(|| "numa.toml".to_string());
+                .unwrap_or_else(numa::cli_config_path);
             let enabled = match sub.as_str() {
                 "on" => true,
                 "off" => false,
@@ -134,9 +134,9 @@ fn main() -> numa::Result<()> {
             eprintln!("  service stop    Uninstall the system service");
             eprintln!("  service restart Restart the service with updated binary");
             eprintln!("  service status  Check if the service is running");
-            trace_usage("  lan on|off      Enable/disable LAN service discovery (mDNS)");
-            trace_usage("  block on|off    Enable/disable ad-blocking");
-            trace_usage("  dnssec on|off   Enable/disable DNSSEC validation");
+            eprintln!("  lan on|off      Enable/disable LAN service discovery (mDNS)");
+            eprintln!("  block on|off    Enable/disable ad-blocking");
+            eprintln!("  dnssec on|off   Enable/disable DNSSEC validation");
             eprintln!("  relay [PORT] [BIND]");
             eprintln!("                  Run as an ODoH relay (RFC 9230, default 127.0.0.1:8443)");
             eprintln!("  setup-phone     Generate a QR code to install Numa DoT on a phone");
@@ -186,8 +186,13 @@ fn set_config_bool(
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
             std::fs::write(path, format!("[{}]\n{} = {}\n", section, key, value))?;
-            print_toggle_status(feature_name, value);
+            print_toggle_status(feature_name, value, path);
             return Ok(());
         }
         Err(e) => return Err(e.into()),
@@ -195,7 +200,7 @@ fn set_config_bool(
 
     let result = update_config_content(&contents, section, key, value);
     std::fs::write(path, result)?;
-    print_toggle_status(feature_name, value);
+    print_toggle_status(feature_name, value, path);
     Ok(())
 }
 
@@ -242,20 +247,20 @@ fn update_config_content(contents: &str, section: &str, key: &str, value: bool) 
     result
 }
 
-fn print_toggle_status(feature: &str, enabled: bool) {
+fn print_toggle_status(feature: &str, enabled: bool, path: &str) {
     let label = if enabled { "enabled" } else { "disabled" };
     let color = if enabled { "32" } else { "33" };
     eprintln!(
         "\x1b[1;38;2;192;98;58mNuma\x1b[0m — {} \x1b[{}m{}\x1b[0m",
         feature, color, label
     );
+    let display = std::fs::canonicalize(path)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.to_string());
+    eprintln!("  Wrote {}", display);
     if enabled {
         eprintln!("  Restart Numa for changes to take effect");
     }
-}
-
-fn trace_usage(msg: &str) {
-    eprintln!("{}", msg);
 }
 
 #[cfg(test)]
@@ -264,8 +269,9 @@ mod tests {
 
     #[test]
     fn test_update_config_content() {
-        let input = "[dnssec]\nstrict = true\n\n[lan]\nenabled = false\n\n[blocking]\nrefresh_hours = 24\n";
-        
+        let input =
+            "[dnssec]\nstrict = true\n\n[lan]\nenabled = false\n\n[blocking]\nrefresh_hours = 24\n";
+
         let output = update_config_content(input, "lan", "enabled", true);
         assert!(output.contains("[lan]\nenabled = true"));
         assert!(output.contains("[dnssec]"));
@@ -280,10 +286,12 @@ mod tests {
     }
 
     #[test]
-    fn test_update_config_out_of_order() {
-        let input = "[lan]\nfoo = 1\n\n[blocking]\nenabled = false\n\n[lan]\nenabled = false\n";
+    fn test_update_config_inserts_into_existing_later_section() {
+        // [blocking] appears before [lan]; [lan] exists but lacks `enabled`.
+        // The new key should land inside [lan], not at EOF or inside [blocking].
+        let input = "[blocking]\nenabled = false\n\n[lan]\nfoo = 1\n";
         let output = update_config_content(input, "lan", "enabled", true);
-        assert!(output.contains("[lan]\nenabled = true"));
+        assert!(output.contains("[lan]\nenabled = true\nfoo = 1"));
         assert!(output.contains("[blocking]\nenabled = false"));
     }
 }
