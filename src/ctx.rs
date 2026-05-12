@@ -565,16 +565,9 @@ fn strip_svcb_ipv6_hints(pkt: &mut DnsPacket) {
     });
 }
 
-/// Final pass before serialization: shape `response` to match what the client
-/// actually asked for, regardless of which upstream path produced it.
-/// Consolidates the per-client invariants that used to live inline in
-/// `resolve_query`:
-///
-/// - **#192**: clear `aa` (Numa is a recursor/forwarder, not authoritative).
-/// - **#193**: emit OPT iff the client did; when preserving, keep upstream's
-///   EDNS options (notably RFC 8914 EDE) and override only the DO bit per
-///   RFC 4035 §3.2.1.
-/// - DNSSEC and SVCB-ipv6hint stripping for non-DO clients.
+/// Final pass before serialization. Clears `aa` (#192), mirrors client's
+/// OPT-or-absence preserving upstream options like EDE (#193, RFC 4035
+/// §3.2.1), strips DNSSEC + SVCB-ipv6hint for non-DO clients.
 fn shape_response_for_client(response: &mut DnsPacket, query: &DnsPacket, filter_aaaa: bool) {
     let client_do = query.edns.as_ref().is_some_and(|e| e.do_bit);
 
@@ -587,17 +580,11 @@ fn shape_response_for_client(response: &mut DnsPacket, query: &DnsPacket, filter
         }
     }
 
-    response.edns = match (&query.edns, response.edns.take()) {
-        (None, _) => None,
-        (Some(_), Some(mut upstream)) => {
-            upstream.do_bit = client_do;
-            Some(upstream)
-        }
-        (Some(_), None) => Some(crate::packet::EdnsOpt {
-            do_bit: client_do,
-            ..Default::default()
-        }),
-    };
+    response.edns = query.edns.as_ref().map(|_| {
+        let mut e = response.edns.take().unwrap_or_default();
+        e.do_bit = client_do;
+        e
+    });
 }
 
 fn is_special_use_domain(qname: &str) -> bool {
