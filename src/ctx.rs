@@ -116,7 +116,6 @@ pub async fn resolve_query(
         }
     };
 
-    let client_do = query.edns.as_ref().is_some_and(|e| e.do_bit);
     let mut response = response;
 
     // DNSSEC validation (recursive/forwarded responses only)
@@ -153,27 +152,7 @@ pub async fn resolve_query(
             .insert_with_status(&qname, qtype, &response, status);
     }
 
-    // Strip DNSSEC records if client didn't set DO bit
-    if !client_do {
-        strip_dnssec_records(&mut response);
-    }
-
-    // filter_aaaa: also strip ipv6hint from HTTPS/SVCB answers so modern
-    // browsers (Chrome ≥103 etc.) don't receive v6 address hints via the
-    // HTTPS record path that bypasses AAAA entirely. Gated on !client_do
-    // because modifying rdata invalidates any accompanying RRSIG — a DO-bit
-    // validator downstream would reject the response as Bogus.
-    if ctx.filter_aaaa && !client_do {
-        strip_svcb_ipv6_hints(&mut response);
-    }
-
-    // Echo EDNS back if client sent it
-    if query.edns.is_some() {
-        response.edns = Some(crate::packet::EdnsOpt {
-            do_bit: client_do,
-            ..Default::default()
-        });
-    }
+    shape_response_for_client(&mut response, &query, ctx.filter_aaaa);
 
     let elapsed = start.elapsed();
 
@@ -584,6 +563,41 @@ fn strip_svcb_ipv6_hints(pkt: &mut DnsPacket) {
             }
         }
     });
+}
+
+/// Final pass before serialization: shape `response` to match what the client
+/// actually asked for, regardless of which upstream path produced it.
+/// Consolidates the per-client invariants that used to live inline in
+/// `resolve_query`:
+///
+/// - **#192**: clear `aa` (Numa is a recursor/forwarder, not authoritative).
+/// - **#193**: emit OPT iff the client did; when preserving, keep upstream's
+///   EDNS options (notably RFC 8914 EDE) and override only the DO bit per
+///   RFC 4035 §3.2.1.
+/// - DNSSEC and SVCB-ipv6hint stripping for non-DO clients.
+fn shape_response_for_client(response: &mut DnsPacket, query: &DnsPacket, filter_aaaa: bool) {
+    let client_do = query.edns.as_ref().is_some_and(|e| e.do_bit);
+
+    response.header.authoritative_answer = false;
+
+    if !client_do {
+        strip_dnssec_records(response);
+        if filter_aaaa {
+            strip_svcb_ipv6_hints(response);
+        }
+    }
+
+    response.edns = match (&query.edns, response.edns.take()) {
+        (None, _) => None,
+        (Some(_), Some(mut upstream)) => {
+            upstream.do_bit = client_do;
+            Some(upstream)
+        }
+        (Some(_), None) => Some(crate::packet::EdnsOpt {
+            do_bit: client_do,
+            ..Default::default()
+        }),
+    };
 }
 
 fn is_special_use_domain(qname: &str) -> bool {
@@ -1787,5 +1801,129 @@ mod tests {
         assert_eq!(resp.questions[0].qtype, QueryType::NS);
         assert!(resp.header.recursion_desired);
         assert!(resp.header.recursion_available);
+    }
+
+    // ---- shape_response_for_client unit tests (#192, #193) ----
+
+    fn ede_opt_bytes(code: u16) -> Vec<u8> {
+        // RFC 8914 OPT body: option-code=15 (EDE), option-length=2, INFO-CODE.
+        let mut v = vec![0, 15, 0, 2];
+        v.extend_from_slice(&code.to_be_bytes());
+        v
+    }
+
+    #[test]
+    fn shape_clears_aa_bit_from_upstream() {
+        // #192: cached/forwarded responses inherit upstream's aa=1; clear it.
+        let query = DnsPacket::query(0x1, "example.com", QueryType::A);
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        response.header.authoritative_answer = true;
+
+        shape_response_for_client(&mut response, &query, false);
+
+        assert!(!response.header.authoritative_answer);
+    }
+
+    #[test]
+    fn shape_drops_edns_when_client_did_not_send() {
+        // #193: RFC 6891 §6.1.1 — emit OPT only when requestor included one.
+        let query = DnsPacket::query(0x1, "example.com", QueryType::A);
+        assert!(query.edns.is_none());
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        response.edns = Some(crate::packet::EdnsOpt {
+            udp_payload_size: 4096,
+            options: ede_opt_bytes(22),
+            ..Default::default()
+        });
+
+        shape_response_for_client(&mut response, &query, false);
+
+        assert!(response.edns.is_none(), "upstream OPT must be dropped");
+    }
+
+    #[test]
+    fn shape_preserves_upstream_edns_options_when_client_sent_edns() {
+        // The EDE-preservation half of #193: when both sides talk EDNS,
+        // keep upstream's EDE/Padding/etc. instead of replacing with a bare
+        // default. EDE in particular tells clients *why* a response is empty.
+        let mut query = DnsPacket::query(0x1, "example.com", QueryType::A);
+        query.edns = Some(crate::packet::EdnsOpt::default());
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        let ede = ede_opt_bytes(22); // 22 = "No Reachable Authority"
+        response.edns = Some(crate::packet::EdnsOpt {
+            udp_payload_size: 1232,
+            options: ede.clone(),
+            do_bit: true,
+            ..Default::default()
+        });
+
+        shape_response_for_client(&mut response, &query, false);
+
+        let edns = response.edns.expect("OPT must be preserved");
+        assert_eq!(edns.options, ede, "EDE option must survive shaping");
+        assert_eq!(edns.udp_payload_size, 1232);
+    }
+
+    #[test]
+    fn shape_overrides_do_bit_to_match_client() {
+        // RFC 4035 §3.2.1: response DO bit reflects the requestor's DO bit.
+        let mut query = DnsPacket::query(0x1, "example.com", QueryType::A);
+        query.edns = Some(crate::packet::EdnsOpt {
+            do_bit: false,
+            ..Default::default()
+        });
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        response.edns = Some(crate::packet::EdnsOpt {
+            do_bit: true,
+            ..Default::default()
+        });
+
+        shape_response_for_client(&mut response, &query, false);
+
+        assert!(!response.edns.unwrap().do_bit);
+    }
+
+    #[test]
+    fn shape_synthesizes_minimal_opt_when_upstream_has_none() {
+        // Client opted into EDNS but upstream omitted OPT (local zones,
+        // synthesized responses) — emit a minimal OPT so the client sees
+        // EDNS in the exchange.
+        let mut query = DnsPacket::query(0x1, "example.com", QueryType::A);
+        query.edns = Some(crate::packet::EdnsOpt::default());
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        assert!(response.edns.is_none());
+
+        shape_response_for_client(&mut response, &query, false);
+
+        assert!(response.edns.is_some());
+    }
+
+    #[test]
+    fn shape_strips_dnssec_records_for_non_do_client() {
+        let query = DnsPacket::query(0x1, "example.com", QueryType::A);
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        response.answers.push(DnsRecord::A {
+            domain: "example.com".into(),
+            addr: Ipv4Addr::new(192, 0, 2, 1),
+            ttl: 300,
+        });
+        response.answers.push(DnsRecord::RRSIG {
+            domain: "example.com".into(),
+            type_covered: QueryType::A.to_num(),
+            algorithm: 13,
+            labels: 2,
+            original_ttl: 300,
+            expiration: 0,
+            inception: 0,
+            key_tag: 0,
+            signer_name: "example.com".into(),
+            signature: vec![],
+            ttl: 300,
+        });
+
+        shape_response_for_client(&mut response, &query, false);
+
+        assert_eq!(response.answers.len(), 1);
+        assert!(matches!(response.answers[0], DnsRecord::A { .. }));
     }
 }
