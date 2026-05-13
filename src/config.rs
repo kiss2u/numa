@@ -862,7 +862,9 @@ mod tests {
     #[test]
     fn wildcard_matches_multi_label_descendant() {
         let map = build_zone_map(&[zone("*.example.com", "A", "10.0.0.3")]).unwrap();
-        let records = map.lookup("deep.sub.example.com", QueryType::A).expect("hit");
+        let records = map
+            .lookup("deep.sub.example.com", QueryType::A)
+            .expect("hit");
         match &records[0] {
             DnsRecord::A { domain, addr, .. } => {
                 assert_eq!(domain, "deep.sub.example.com");
@@ -1559,6 +1561,10 @@ impl ZoneMap {
     pub fn len(&self) -> usize {
         self.exact.values().map(|m| m.len()).sum::<usize>()
             + self.wildcard.values().map(|m| m.len()).sum::<usize>()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.exact.is_empty() && self.wildcard.is_empty()
     }
 
     /// `None` = no zone owns this name (fall through to next stage).
