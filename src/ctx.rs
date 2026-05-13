@@ -182,6 +182,7 @@ pub async fn resolve_query(
         debug!("response too large, setting TC bit for {}", qname);
         let mut tc_response = DnsPacket::response_from(&query, response.header.rescode);
         tc_response.header.truncated_message = true;
+        shape_response_for_client(&mut tc_response, &query, ctx.filter_aaaa);
         resp_buffer = BytePacketBuffer::new();
         tc_response.write(&mut resp_buffer)?;
     }
@@ -568,7 +569,17 @@ fn strip_svcb_ipv6_hints(pkt: &mut DnsPacket) {
 /// Final pass before serialization. Clears `aa` (#192), mirrors client's
 /// OPT-or-absence preserving upstream options like EDE (#193, RFC 4035
 /// §3.2.1), strips DNSSEC + SVCB-ipv6hint for non-DO clients.
-fn shape_response_for_client(response: &mut DnsPacket, query: &DnsPacket, filter_aaaa: bool) {
+///
+/// Must be called on every response built for a client: happy path
+/// (resolve_query), TC-bit rebuild, and SERVFAIL/FORMERR in tcp/doh.
+/// The pre-parse FORMERR in tcp/doh is the one exception — the query
+/// never parsed, so OPT mirroring is impossible. AD bit is owned by
+/// the validator (ctx.rs:142) and intentionally not touched here.
+pub(crate) fn shape_response_for_client(
+    response: &mut DnsPacket,
+    query: &DnsPacket,
+    filter_aaaa: bool,
+) {
     let client_do = query.edns.as_ref().is_some_and(|e| e.do_bit);
 
     response.header.authoritative_answer = false;
@@ -1946,6 +1957,34 @@ mod tests {
         assert_eq!(
             edns.options, ede,
             "EDE option bytes must survive serialize -> reparse"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_truncated_response_mirrors_client_opt() {
+        // RFC 6891 §6.1.1: the OPT-mirror invariant must hold even on the
+        // TC-bit rebuild path, which throws the original (shaped) response
+        // away and synthesizes a fresh one when serialization overflows.
+        let mut ctx = crate::testutil::test_ctx().await;
+        let big_record = DnsRecord::UNKNOWN {
+            domain: "huge.test".into(),
+            qtype: 99,
+            data: vec![0u8; 5000], // exceeds the 4096-byte serialization buffer
+            ttl: 60,
+        };
+        let mut inner = HashMap::new();
+        inner.insert(QueryType::UNKNOWN(99), vec![big_record]);
+        ctx.zone_map.insert("huge.test".to_string(), inner);
+        let ctx = Arc::new(ctx);
+
+        let mut query = DnsPacket::query(0xBEEF, "huge.test", QueryType::UNKNOWN(99));
+        query.edns = Some(crate::packet::EdnsOpt::default());
+        let (resp, _) = resolve_in_test_with_query(&ctx, query).await;
+
+        assert!(resp.header.truncated_message, "TC bit must be set");
+        assert!(
+            resp.edns.is_some(),
+            "TC response must mirror client's OPT"
         );
     }
 }

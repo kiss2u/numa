@@ -166,7 +166,8 @@ pub(crate) async fn handle_framed_dns_connection<S>(
             }
             Err(e) => {
                 warn!("{} | RESOLVE ERROR | {}", remote_addr, e);
-                let resp = DnsPacket::response_from(&query, ResultCode::SERVFAIL);
+                let mut resp = DnsPacket::response_from(&query, ResultCode::SERVFAIL);
+                crate::ctx::shape_response_for_client(&mut resp, &query, ctx.filter_aaaa);
                 if send_response(&mut stream, &resp, remote_addr, proto)
                     .await
                     .is_err()
@@ -335,6 +336,28 @@ mod tests {
         assert_eq!(resp.header.rescode, ResultCode::SERVFAIL);
         assert_eq!(resp.questions.len(), 1);
         assert_eq!(resp.questions[0].name, "nonexistent.test");
+    }
+
+    #[tokio::test]
+    async fn tcp_servfail_mirrors_client_opt() {
+        // RFC 6891 §6.1.1: the SERVFAIL on the Err-branch (resolve_query
+        // rejects a malformed query) must still mirror client OPT. The
+        // empty-questions case is the only Err resolve_query can return, so
+        // it's the only way to drive the suspect branch from a unit test.
+        let addr = spawn_tcp_server().await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        let mut query = DnsPacket::new();
+        query.header.id = 0xBEEF;
+        query.header.recursion_desired = true;
+        query.edns = Some(crate::packet::EdnsOpt::default());
+        let resp = tcp_exchange(&mut stream, &query).await;
+
+        assert_eq!(resp.header.rescode, ResultCode::SERVFAIL);
+        assert!(
+            resp.edns.is_some(),
+            "SERVFAIL must mirror client's OPT"
+        );
     }
 
     #[tokio::test]
