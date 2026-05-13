@@ -9,7 +9,7 @@ use tokio::net::UdpSocket;
 use crate::blocklist::BlocklistStore;
 use crate::buffer::BytePacketBuffer;
 use crate::cache::DnsCache;
-use crate::config::UpstreamMode;
+use crate::config::{UpstreamMode, ZoneMap};
 use crate::ctx::ServerCtx;
 use crate::forward::{Upstream, UpstreamPool};
 use crate::header::ResultCode;
@@ -28,7 +28,7 @@ pub async fn test_ctx() -> ServerCtx {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     ServerCtx {
         socket,
-        zone_map: HashMap::new(),
+        zone_map: ZoneMap::default(),
         cache: RwLock::new(DnsCache::new(100, 60, 86400)),
         refreshing: Mutex::new(HashSet::new()),
         stats: Mutex::new(ServerStats::new()),

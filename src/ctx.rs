@@ -238,9 +238,10 @@ fn resolve_local(
         ));
         return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
     }
-    if let Some(records) = ctx.zone_map.get(qname).and_then(|m| m.get(&qtype)) {
+    // RFC 4592 §2.2.1: empty answers (NODATA) still answer locally — don't leak upstream.
+    if let Some(records) = ctx.zone_map.lookup(qname, qtype) {
         let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
-        resp.answers = records.clone();
+        resp.answers = records;
         return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
     }
     if is_special_use_domain(qname)
@@ -1300,16 +1301,11 @@ mod tests {
     #[tokio::test]
     async fn pipeline_local_zone_returns_configured_record() {
         let mut ctx = crate::testutil::test_ctx().await;
-        let mut inner = HashMap::new();
-        inner.insert(
-            QueryType::A,
-            vec![DnsRecord::A {
-                domain: "myapp.test".to_string(),
-                addr: Ipv4Addr::new(10, 0, 0, 42),
-                ttl: 300,
-            }],
-        );
-        ctx.zone_map.insert("myapp.test".to_string(), inner);
+        ctx.zone_map = crate::config::ZoneMap::from_exact(vec![DnsRecord::A {
+            domain: "myapp.test".to_string(),
+            addr: Ipv4Addr::new(10, 0, 0, 42),
+            ttl: 300,
+        }]);
         let ctx = Arc::new(ctx);
 
         let (resp, path) = resolve_in_test(&ctx, "myapp.test", QueryType::A).await;
@@ -1319,6 +1315,53 @@ mod tests {
             DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(10, 0, 0, 42)),
             other => panic!("expected A record, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn pipeline_wildcard_zone_synthesizes_with_qname_owner() {
+        use crate::config::build_zone_map;
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.zone_map = build_zone_map(&[crate::config::ZoneRecord {
+            domain: "*.pool.ntp.org".into(),
+            record_type: "A".into(),
+            value: "10.20.30.40".into(),
+            ttl: 300,
+        }])
+        .unwrap();
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "time2.pool.ntp.org", QueryType::A).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        match &resp.answers[0] {
+            DnsRecord::A { domain, addr, .. } => {
+                assert_eq!(domain, "time2.pool.ntp.org", "owner must be QNAME");
+                assert_eq!(*addr, Ipv4Addr::new(10, 20, 30, 40));
+            }
+            other => panic!("expected A, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_wildcard_zone_nodata_does_not_fall_through() {
+        // Wildcard parent matched but qtype absent → NOERROR/empty,
+        // NOT an upstream lookup. Upstream points at a blackhole, so a
+        // fall-through would SERVFAIL after timeout.
+        use crate::config::build_zone_map;
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.zone_map = build_zone_map(&[crate::config::ZoneRecord {
+            domain: "*.foo".into(),
+            record_type: "A".into(),
+            value: "10.0.0.1".into(),
+            ttl: 300,
+        }])
+        .unwrap();
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "x.foo", QueryType::AAAA).await;
+        assert_eq!(path, QueryPath::Local, "must answer locally, not upstream");
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert!(resp.answers.is_empty(), "NoData must return empty answers");
     }
 
     #[tokio::test]
@@ -1971,9 +2014,7 @@ mod tests {
             data: vec![0u8; 5000], // exceeds the 4096-byte serialization buffer
             ttl: 60,
         };
-        let mut inner = HashMap::new();
-        inner.insert(QueryType::UNKNOWN(99), vec![big_record]);
-        ctx.zone_map.insert("huge.test".to_string(), inner);
+        ctx.zone_map = crate::config::ZoneMap::from_exact(vec![big_record]);
         let ctx = Arc::new(ctx);
 
         let mut query = DnsPacket::query(0xBEEF, "huge.test", QueryType::UNKNOWN(99));
