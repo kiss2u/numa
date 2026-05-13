@@ -566,15 +566,14 @@ fn strip_svcb_ipv6_hints(pkt: &mut DnsPacket) {
     });
 }
 
-/// Final pass before serialization. Clears `aa` (#192), mirrors client's
-/// OPT-or-absence preserving upstream options like EDE (#193, RFC 4035
-/// §3.2.1), strips DNSSEC + SVCB-ipv6hint for non-DO clients.
+/// Final pass before serialization. Clears `aa`, mirrors the client's
+/// OPT-or-absence (RFC 6891 §6.1.1) preserving upstream options such as
+/// EDE, and strips DNSSEC + SVCB-ipv6hint for non-DO clients (RFC 4035
+/// §3.2.1).
 ///
-/// Must be called on every response built for a client: happy path
-/// (resolve_query), TC-bit rebuild, and SERVFAIL/FORMERR in tcp/doh.
-/// The pre-parse FORMERR in tcp/doh is the one exception — the query
-/// never parsed, so OPT mirroring is impossible. AD bit is owned by
-/// the validator (ctx.rs:142) and intentionally not touched here.
+/// Call on every response built for a client: happy path, TC rebuild,
+/// SERVFAIL/FORMERR. The pre-parse FORMERR is the exception — no parsed
+/// query, no OPT to mirror.
 pub(crate) fn shape_response_for_client(
     response: &mut DnsPacket,
     query: &DnsPacket,

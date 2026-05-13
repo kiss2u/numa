@@ -217,10 +217,7 @@ mod tests {
 
     #[tokio::test]
     async fn doh_servfail_mirrors_client_opt() {
-        // RFC 6891 §6.1.1: SERVFAIL on the DoH error path must echo client OPT.
-        // resolve_query returns Err("empty question section") for queries with
-        // header.questions == 0, which is the cheapest way to drive the error
-        // branch from a unit test.
+        // RFC 6891 §6.1.1 on the Err-branch; empty-questions drives it.
         let mut query = DnsPacket::new();
         query.header.id = 0x1234;
         query.header.recursion_desired = true;

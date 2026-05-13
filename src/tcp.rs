@@ -340,10 +340,7 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_servfail_mirrors_client_opt() {
-        // RFC 6891 §6.1.1: the SERVFAIL on the Err-branch (resolve_query
-        // rejects a malformed query) must still mirror client OPT. The
-        // empty-questions case is the only Err resolve_query can return, so
-        // it's the only way to drive the suspect branch from a unit test.
+        // RFC 6891 §6.1.1 on the Err-branch; empty-questions drives it.
         let addr = spawn_tcp_server().await;
         let mut stream = TcpStream::connect(addr).await.unwrap();
 
