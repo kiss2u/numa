@@ -1982,9 +1982,6 @@ mod tests {
         let (resp, _) = resolve_in_test_with_query(&ctx, query).await;
 
         assert!(resp.header.truncated_message, "TC bit must be set");
-        assert!(
-            resp.edns.is_some(),
-            "TC response must mirror client's OPT"
-        );
+        assert!(resp.edns.is_some(), "TC response must mirror client's OPT");
     }
 }

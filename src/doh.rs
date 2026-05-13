@@ -232,14 +232,13 @@ mod tests {
         let src: std::net::SocketAddr = "127.0.0.1:1234".parse().unwrap();
         let response = resolve_doh(buf.filled(), src, &ctx).await;
 
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let mut parse = BytePacketBuffer::from_bytes(&body);
         let resp = DnsPacket::from_buffer(&mut parse).unwrap();
 
         assert_eq!(resp.header.rescode, ResultCode::SERVFAIL);
-        assert!(
-            resp.edns.is_some(),
-            "DoH SERVFAIL must mirror client's OPT"
-        );
+        assert!(resp.edns.is_some(), "DoH SERVFAIL must mirror client's OPT");
     }
 }

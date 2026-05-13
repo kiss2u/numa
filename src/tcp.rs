@@ -354,10 +354,7 @@ mod tests {
         let resp = tcp_exchange(&mut stream, &query).await;
 
         assert_eq!(resp.header.rescode, ResultCode::SERVFAIL);
-        assert!(
-            resp.edns.is_some(),
-            "SERVFAIL must mirror client's OPT"
-        );
+        assert!(resp.edns.is_some(), "SERVFAIL must mirror client's OPT");
     }
 
     #[tokio::test]
