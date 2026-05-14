@@ -201,9 +201,7 @@ pub async fn resolve_query(
     Ok((resp_buffer, path))
 }
 
-/// Wire-encode `response`: buffer-full → TC bit, serializer-rejected → SERVFAIL.
-/// Mutates `response.header.rescode` on SERVFAIL so the caller's query log
-/// reflects the truth (see #142).
+/// Buffer-full → TC bit, serializer-rejected → SERVFAIL (#142).
 fn serialize_with_fallback(
     response: &mut DnsPacket,
     query: &DnsPacket,
@@ -224,6 +222,7 @@ fn serialize_with_fallback(
         }
         Err(e) => {
             warn!("response serialize error for {}: {}", qname, e);
+            // mirror to caller's rescode so the query log reflects SERVFAIL
             response.header.rescode = ResultCode::SERVFAIL;
             let mut servfail = DnsPacket::response_from(query, ResultCode::SERVFAIL);
             shape_response_for_client(&mut servfail, query, filter_aaaa);

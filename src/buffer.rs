@@ -38,8 +38,7 @@ impl BytePacketBuffer {
         &self.buf[..self.pos]
     }
 
-    /// True iff a `write*` errored because the buffer was full (vs. input
-    /// rejection by write_qname). Only the former is a legit TC fallback (#142).
+    /// True iff a `write*` errored because the buffer was full (#142).
     pub fn overflowed(&self) -> bool {
         self.overflow
     }
@@ -444,28 +443,22 @@ mod tests {
         assert_eq!(&b.buf[..b.pos], b"\x00");
     }
 
-    fn assert_read_qname_err(wire: &[u8], start: usize) {
-        let mut buf = BytePacketBuffer::from_bytes(wire);
-        buf.seek(start).unwrap();
-        let mut out = String::new();
-        assert!(buf.read_qname(&mut out).is_err(), "got Ok({:?})", out);
-    }
-
     #[test]
     fn read_qname_rejects_reserved_label_high_bits() {
         // RFC 1035 §4.1.4: 01/10 are reserved (only 00 = label, 11 = pointer).
         let mut wire = vec![0x80];
         wire.extend(std::iter::repeat_n(b'a', 128));
         wire.push(0);
-        assert_read_qname_err(&wire, 0);
+        let mut buf = BytePacketBuffer::from_bytes(&wire);
+        assert!(buf.read_qname(&mut String::new()).is_err());
     }
 
     #[test]
     fn read_qname_rejects_pointer_landing_mid_label() {
         // [3]foo[0]<c0 02> — pointer jumps to offset 2 ('o' = 0x6f), whose
-        // reserved bits trip the guard. Mid-label landings on bytes < 0x40
-        // still slip through — best-effort, not full structural validation.
-        // Observed against Tailscale MagicDNS (#142).
-        assert_read_qname_err(b"\x03foo\x00\xc0\x02", 5);
+        // reserved bits trip the guard. Observed against Tailscale MagicDNS (#142).
+        let mut buf = BytePacketBuffer::from_bytes(b"\x03foo\x00\xc0\x02");
+        buf.seek(5).unwrap();
+        assert!(buf.read_qname(&mut String::new()).is_err());
     }
 }
