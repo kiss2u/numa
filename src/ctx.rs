@@ -173,8 +173,6 @@ pub async fn resolve_query(
         response.resources.len(),
     );
 
-    // TODO: TC bit is UDP-specific; DoT connections could carry up to 65535 bytes.
-    // Once BytePacketBuffer supports larger buffers, skip truncation for TCP/TLS.
     let resp_buffer = serialize_with_fallback(&mut response, &query, &qname, ctx.filter_aaaa)?;
 
     // Record stats and query log
@@ -202,6 +200,8 @@ pub async fn resolve_query(
 }
 
 /// Buffer-full → TC bit, serializer-rejected → SERVFAIL (#142).
+/// TODO: TC is UDP-specific; once BytePacketBuffer supports >4096 bytes,
+/// skip truncation for TCP/TLS (which can carry up to 65535).
 fn serialize_with_fallback(
     response: &mut DnsPacket,
     query: &DnsPacket,
