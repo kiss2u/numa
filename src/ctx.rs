@@ -1760,6 +1760,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pipeline_forwarding_malformed_upstream_yields_servfail() {
+        // #142: pre-fix, a label byte with reserved high bits 01 was treated
+        // as a length and silently consumed up to 191 bytes of garbage. This
+        // packet's authority NS record starts with 0x40 (64 + reserved bits) —
+        // pre-fix parsed cleanly and returned a bogus NS to the client.
+        // Post-fix the parser rejects, surfacing as SERVFAIL.
+        let mut wire = vec![
+            0x01, 0x00, 0x81, 0x80, // id (patched), flags
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, // QD=1 NS=1
+            0x01, b'x', 0x04, b't', b'e', b's', b't', 0x00, // qname x.test
+            0x00, 0x01, 0x00, 0x01, // A IN
+            0x40, // authority name length: 64 with reserved bits 01
+        ];
+        wire.extend(std::iter::repeat_n(b'a', 64)); // 64 bytes of filler label
+        wire.extend_from_slice(&[
+            0x00, // name terminator
+            0x00, 0x02, 0x00, 0x01, // NS IN
+            0x00, 0x00, 0x0e, 0x10, // TTL 3600
+            0x00, 0x02, 0xc0, 0x0c, // RDLEN=2, rdata = pointer to qname
+        ]);
+
+        let upstream_addr = crate::testutil::mock_upstream_raw(wire).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "test".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
+        )];
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "x.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::UpstreamError);
+        assert_eq!(resp.header.rescode, ResultCode::SERVFAIL);
+        assert!(resp.answers.is_empty());
+    }
+
+    #[tokio::test]
     async fn pipeline_default_pool_reports_upstream_path() {
         let upstream_resp =
             crate::testutil::a_record_response("example.com", Ipv4Addr::new(93, 184, 216, 34), 300);

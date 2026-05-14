@@ -101,6 +101,22 @@ pub async fn mock_upstream(response: DnsPacket) -> SocketAddr {
     addr
 }
 
+/// Like `mock_upstream` but sends raw wire bytes (patches the first 2 bytes
+/// with the query ID). Use when the response is intentionally malformed and
+/// can't survive our own serializer.
+pub async fn mock_upstream_raw(mut bytes: Vec<u8>) -> SocketAddr {
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 512];
+        let (_, src) = sock.recv_from(&mut buf).await.unwrap();
+        bytes[0] = buf[0];
+        bytes[1] = buf[1];
+        sock.send_to(&bytes, src).await.unwrap();
+    });
+    addr
+}
+
 /// UDP socket that accepts connections but never replies.
 /// Useful as an upstream that triggers timeouts.
 pub fn blackhole_upstream() -> SocketAddr {
