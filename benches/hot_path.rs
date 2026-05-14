@@ -198,23 +198,6 @@ fn bench_zone_lookup_miss(c: &mut Criterion) {
     });
 }
 
-fn bench_zone_lookup_wildcard_hit(c: &mut Criterion) {
-    use numa::config::{build_zone_map, ZoneRecord};
-    let map = build_zone_map(&[ZoneRecord {
-        domain: "*.foo.bar.baz".into(),
-        record_type: "A".into(),
-        value: "10.0.0.1".into(),
-        ttl: 300,
-    }])
-    .unwrap();
-
-    c.bench_function("zone_lookup_wildcard_hit", |b| {
-        b.iter(|| {
-            map.lookup(black_box("deep.sub.foo.bar.baz"), QueryType::A);
-        })
-    });
-}
-
 criterion_group!(
     benches,
     bench_buffer_parse,
@@ -226,6 +209,5 @@ criterion_group!(
     bench_round_trip,
     bench_cache_populated_lookup,
     bench_zone_lookup_miss,
-    bench_zone_lookup_wildcard_hit,
 );
 criterion_main!(benches);
