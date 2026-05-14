@@ -116,7 +116,6 @@ pub async fn resolve_query(
         }
     };
 
-    let client_do = query.edns.as_ref().is_some_and(|e| e.do_bit);
     let mut response = response;
 
     // DNSSEC validation (recursive/forwarded responses only)
@@ -153,27 +152,7 @@ pub async fn resolve_query(
             .insert_with_status(&qname, qtype, &response, status);
     }
 
-    // Strip DNSSEC records if client didn't set DO bit
-    if !client_do {
-        strip_dnssec_records(&mut response);
-    }
-
-    // filter_aaaa: also strip ipv6hint from HTTPS/SVCB answers so modern
-    // browsers (Chrome ≥103 etc.) don't receive v6 address hints via the
-    // HTTPS record path that bypasses AAAA entirely. Gated on !client_do
-    // because modifying rdata invalidates any accompanying RRSIG — a DO-bit
-    // validator downstream would reject the response as Bogus.
-    if ctx.filter_aaaa && !client_do {
-        strip_svcb_ipv6_hints(&mut response);
-    }
-
-    // Echo EDNS back if client sent it
-    if query.edns.is_some() {
-        response.edns = Some(crate::packet::EdnsOpt {
-            do_bit: client_do,
-            ..Default::default()
-        });
-    }
+    shape_response_for_client(&mut response, &query, ctx.filter_aaaa);
 
     let elapsed = start.elapsed();
 
@@ -196,7 +175,7 @@ pub async fn resolve_query(
 
     // TODO: TC bit is UDP-specific; DoT connections could carry up to 65535 bytes.
     // Once BytePacketBuffer supports larger buffers, skip truncation for TCP/TLS.
-    let resp_buffer = serialize_with_fallback(&mut response, &query, &qname)?;
+    let resp_buffer = serialize_with_fallback(&mut response, &query, &qname, ctx.filter_aaaa)?;
 
     // Record stats and query log
     {
@@ -229,6 +208,7 @@ fn serialize_with_fallback(
     response: &mut DnsPacket,
     query: &DnsPacket,
     qname: &str,
+    filter_aaaa: bool,
 ) -> crate::Result<BytePacketBuffer> {
     let mut buf = BytePacketBuffer::new();
     match response.write(&mut buf) {
@@ -237,6 +217,7 @@ fn serialize_with_fallback(
             debug!("response too large, setting TC bit for {}", qname);
             let mut tc = DnsPacket::response_from(query, response.header.rescode);
             tc.header.truncated_message = true;
+            shape_response_for_client(&mut tc, query, filter_aaaa);
             let mut out = BytePacketBuffer::new();
             tc.write(&mut out)?;
             Ok(out)
@@ -244,7 +225,8 @@ fn serialize_with_fallback(
         Err(e) => {
             warn!("response serialize error for {}: {}", qname, e);
             response.header.rescode = ResultCode::SERVFAIL;
-            let servfail = DnsPacket::response_from(query, ResultCode::SERVFAIL);
+            let mut servfail = DnsPacket::response_from(query, ResultCode::SERVFAIL);
+            shape_response_for_client(&mut servfail, query, filter_aaaa);
             let mut out = BytePacketBuffer::new();
             servfail.write(&mut out)?;
             Ok(out)
@@ -279,9 +261,10 @@ fn resolve_local(
         ));
         return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
     }
-    if let Some(records) = ctx.zone_map.get(qname).and_then(|m| m.get(&qtype)) {
+    // RFC 4592 §2.2.1: empty answers (NODATA) still answer locally — don't leak upstream.
+    if let Some(records) = ctx.zone_map.lookup(qname, qtype) {
         let mut resp = DnsPacket::response_from(query, ResultCode::NOERROR);
-        resp.answers = records.clone();
+        resp.answers = records;
         return Some((resp, QueryPath::Local, DnssecStatus::Indeterminate));
     }
     if is_special_use_domain(qname)
@@ -604,6 +587,37 @@ fn strip_svcb_ipv6_hints(pkt: &mut DnsPacket) {
                 }
             }
         }
+    });
+}
+
+/// Final pass before serialization. Clears `aa`, mirrors the client's
+/// OPT-or-absence (RFC 6891 §6.1.1) preserving upstream options such as
+/// EDE, and strips DNSSEC + SVCB-ipv6hint for non-DO clients (RFC 4035
+/// §3.2.1).
+///
+/// Call on every response built for a client: happy path, TC rebuild,
+/// SERVFAIL/FORMERR. The pre-parse FORMERR is the exception — no parsed
+/// query, no OPT to mirror.
+pub(crate) fn shape_response_for_client(
+    response: &mut DnsPacket,
+    query: &DnsPacket,
+    filter_aaaa: bool,
+) {
+    let client_do = query.edns.as_ref().is_some_and(|e| e.do_bit);
+
+    response.header.authoritative_answer = false;
+
+    if !client_do {
+        strip_dnssec_records(response);
+        if filter_aaaa {
+            strip_svcb_ipv6_hints(response);
+        }
+    }
+
+    response.edns = query.edns.as_ref().map(|_| {
+        let mut e = response.edns.take().unwrap_or_default();
+        e.do_bit = client_do;
+        e
     });
 }
 
@@ -1210,7 +1224,13 @@ mod tests {
         domain: &str,
         qtype: QueryType,
     ) -> (DnsPacket, QueryPath) {
-        let query = DnsPacket::query(0xBEEF, domain, qtype);
+        resolve_in_test_with_query(ctx, DnsPacket::query(0xBEEF, domain, qtype)).await
+    }
+
+    async fn resolve_in_test_with_query(
+        ctx: &Arc<ServerCtx>,
+        query: DnsPacket,
+    ) -> (DnsPacket, QueryPath) {
         let mut buf = BytePacketBuffer::new();
         query.write(&mut buf).unwrap();
         let raw = &buf.buf[..buf.pos];
@@ -1304,16 +1324,11 @@ mod tests {
     #[tokio::test]
     async fn pipeline_local_zone_returns_configured_record() {
         let mut ctx = crate::testutil::test_ctx().await;
-        let mut inner = HashMap::new();
-        inner.insert(
-            QueryType::A,
-            vec![DnsRecord::A {
-                domain: "myapp.test".to_string(),
-                addr: Ipv4Addr::new(10, 0, 0, 42),
-                ttl: 300,
-            }],
-        );
-        ctx.zone_map.insert("myapp.test".to_string(), inner);
+        ctx.zone_map = crate::config::ZoneMap::from_exact(vec![DnsRecord::A {
+            domain: "myapp.test".to_string(),
+            addr: Ipv4Addr::new(10, 0, 0, 42),
+            ttl: 300,
+        }]);
         let ctx = Arc::new(ctx);
 
         let (resp, path) = resolve_in_test(&ctx, "myapp.test", QueryType::A).await;
@@ -1323,6 +1338,53 @@ mod tests {
             DnsRecord::A { addr, .. } => assert_eq!(*addr, Ipv4Addr::new(10, 0, 0, 42)),
             other => panic!("expected A record, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn pipeline_wildcard_zone_synthesizes_with_qname_owner() {
+        use crate::config::build_zone_map;
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.zone_map = build_zone_map(&[crate::config::ZoneRecord {
+            domain: "*.pool.ntp.org".into(),
+            record_type: "A".into(),
+            value: "10.20.30.40".into(),
+            ttl: 300,
+        }])
+        .unwrap();
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "time2.pool.ntp.org", QueryType::A).await;
+        assert_eq!(path, QueryPath::Local);
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        match &resp.answers[0] {
+            DnsRecord::A { domain, addr, .. } => {
+                assert_eq!(domain, "time2.pool.ntp.org", "owner must be QNAME");
+                assert_eq!(*addr, Ipv4Addr::new(10, 20, 30, 40));
+            }
+            other => panic!("expected A, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_wildcard_zone_nodata_does_not_fall_through() {
+        // Wildcard parent matched but qtype absent → NOERROR/empty,
+        // NOT an upstream lookup. Upstream points at a blackhole, so a
+        // fall-through would SERVFAIL after timeout.
+        use crate::config::build_zone_map;
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.zone_map = build_zone_map(&[crate::config::ZoneRecord {
+            domain: "*.foo".into(),
+            record_type: "A".into(),
+            value: "10.0.0.1".into(),
+            ttl: 300,
+        }])
+        .unwrap();
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "x.foo", QueryType::AAAA).await;
+        assert_eq!(path, QueryPath::Local, "must answer locally, not upstream");
+        assert_eq!(resp.header.rescode, ResultCode::NOERROR);
+        assert!(resp.answers.is_empty(), "NoData must return empty answers");
     }
 
     #[tokio::test]
@@ -1789,7 +1851,7 @@ mod tests {
             addr: Ipv4Addr::new(192, 0, 2, 1),
             ttl: 300,
         });
-        let buf = serialize_with_fallback(&mut response, &query, "example.com").unwrap();
+        let buf = serialize_with_fallback(&mut response, &query, "example.com", false).unwrap();
         let parsed =
             DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(buf.filled())).unwrap();
         assert_eq!(parsed.header.rescode, ResultCode::NOERROR);
@@ -1810,7 +1872,7 @@ mod tests {
                 ttl: 300,
             });
         }
-        let buf = serialize_with_fallback(&mut response, &query, "example.com").unwrap();
+        let buf = serialize_with_fallback(&mut response, &query, "example.com", false).unwrap();
         let parsed =
             DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(buf.filled())).unwrap();
         assert!(parsed.header.truncated_message, "TC bit must be set");
@@ -1828,7 +1890,7 @@ mod tests {
             addr: Ipv4Addr::new(192, 0, 2, 1),
             ttl: 300,
         });
-        let buf = serialize_with_fallback(&mut response, &query, "example.com").unwrap();
+        let buf = serialize_with_fallback(&mut response, &query, "example.com", false).unwrap();
         let parsed =
             DnsPacket::from_buffer(&mut BytePacketBuffer::from_bytes(buf.filled())).unwrap();
         assert_eq!(parsed.header.rescode, ResultCode::SERVFAIL);
@@ -1871,5 +1933,181 @@ mod tests {
         assert_eq!(resp.questions[0].qtype, QueryType::NS);
         assert!(resp.header.recursion_desired);
         assert!(resp.header.recursion_available);
+    }
+
+    // ---- shape_response_for_client unit tests ----
+
+    fn ede_opt_bytes(code: u16) -> Vec<u8> {
+        // RFC 8914 OPT body: option-code=15 (EDE), option-length=2, INFO-CODE.
+        let mut v = vec![0, 15, 0, 2];
+        v.extend_from_slice(&code.to_be_bytes());
+        v
+    }
+
+    #[test]
+    fn shape_overrides_do_bit_to_match_client() {
+        // RFC 4035 §3.2.1: response DO bit reflects the requestor's DO bit.
+        let mut query = DnsPacket::query(0x1, "example.com", QueryType::A);
+        query.edns = Some(crate::packet::EdnsOpt {
+            do_bit: false,
+            ..Default::default()
+        });
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        response.edns = Some(crate::packet::EdnsOpt {
+            do_bit: true,
+            ..Default::default()
+        });
+
+        shape_response_for_client(&mut response, &query, false);
+
+        assert!(!response.edns.unwrap().do_bit);
+    }
+
+    #[test]
+    fn shape_synthesizes_minimal_opt_when_upstream_has_none() {
+        // Client opted into EDNS but upstream omitted OPT (local zones,
+        // synthesized responses) — emit a minimal OPT so the client sees
+        // EDNS in the exchange.
+        let mut query = DnsPacket::query(0x1, "example.com", QueryType::A);
+        query.edns = Some(crate::packet::EdnsOpt::default());
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        assert!(response.edns.is_none());
+
+        shape_response_for_client(&mut response, &query, false);
+
+        assert!(response.edns.is_some());
+    }
+
+    #[test]
+    fn shape_strips_dnssec_records_for_non_do_client() {
+        let query = DnsPacket::query(0x1, "example.com", QueryType::A);
+        let mut response = DnsPacket::response_from(&query, ResultCode::NOERROR);
+        response.answers.push(DnsRecord::A {
+            domain: "example.com".into(),
+            addr: Ipv4Addr::new(192, 0, 2, 1),
+            ttl: 300,
+        });
+        response.answers.push(DnsRecord::RRSIG {
+            domain: "example.com".into(),
+            type_covered: QueryType::A.to_num(),
+            algorithm: 13,
+            labels: 2,
+            original_ttl: 300,
+            expiration: 0,
+            inception: 0,
+            key_tag: 0,
+            signer_name: "example.com".into(),
+            signature: vec![],
+            ttl: 300,
+        });
+
+        shape_response_for_client(&mut response, &query, false);
+
+        assert_eq!(response.answers.len(), 1);
+        assert!(matches!(response.answers[0], DnsRecord::A { .. }));
+    }
+
+    // ---- Wiring tests: shape_response_for_client must be called by resolve_query ----
+
+    #[tokio::test]
+    async fn pipeline_clears_aa_bit_from_forwarded_response() {
+        // #192: even when upstream sets aa=1, the client must see aa=0.
+        let mut upstream_resp =
+            crate::testutil::a_record_response("aa.test", Ipv4Addr::new(1, 2, 3, 4), 60);
+        upstream_resp.header.authoritative_answer = true;
+        let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "aa.test".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
+        )];
+        let ctx = Arc::new(ctx);
+
+        let (resp, path) = resolve_in_test(&ctx, "aa.test", QueryType::A).await;
+        assert_eq!(path, QueryPath::Forwarded);
+        assert!(
+            !resp.header.authoritative_answer,
+            "aa bit must be cleared even when upstream set it"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_drops_opt_when_client_sent_none() {
+        // #193 / RFC 6891 §6.1.1: client sent no OPT -> response must have none,
+        // even if upstream included one.
+        let mut upstream_resp =
+            crate::testutil::a_record_response("noedns.test", Ipv4Addr::new(1, 2, 3, 4), 60);
+        upstream_resp.edns = Some(crate::packet::EdnsOpt::default());
+        let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "noedns.test".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
+        )];
+        let ctx = Arc::new(ctx);
+
+        let (resp, _) = resolve_in_test(&ctx, "noedns.test", QueryType::A).await;
+        assert!(
+            resp.edns.is_none(),
+            "client sent no OPT, response must omit OPT"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_preserves_upstream_ede_for_edns_client() {
+        // #136 angle: when the client opts into EDNS, upstream's EDE option
+        // must survive the full pipeline (serialize -> reparse) so debuggers
+        // and validators see *why* a response is empty.
+        let ede = ede_opt_bytes(22); // 22 = "No Reachable Authority"
+        let mut upstream_resp = DnsPacket::new();
+        upstream_resp.header.response = true;
+        upstream_resp.header.rescode = ResultCode::NOERROR;
+        upstream_resp.edns = Some(crate::packet::EdnsOpt {
+            options: ede.clone(),
+            ..Default::default()
+        });
+        let upstream_addr = crate::testutil::mock_upstream(upstream_resp).await;
+
+        let mut ctx = crate::testutil::test_ctx().await;
+        ctx.forwarding_rules = vec![ForwardingRule::new(
+            "ede.test".to_string(),
+            UpstreamPool::new(vec![Upstream::Udp(upstream_addr)], vec![]),
+        )];
+        let ctx = Arc::new(ctx);
+
+        let mut query = DnsPacket::query(0xBEEF, "ede.test", QueryType::A);
+        query.edns = Some(crate::packet::EdnsOpt::default());
+        let (resp, _) = resolve_in_test_with_query(&ctx, query).await;
+
+        let edns = resp.edns.expect("OPT must reach the client");
+        assert_eq!(
+            edns.options, ede,
+            "EDE option bytes must survive serialize -> reparse"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_truncated_response_mirrors_client_opt() {
+        // RFC 6891 §6.1.1: the OPT-mirror invariant must hold even on the
+        // TC-bit rebuild path, which throws the original (shaped) response
+        // away and synthesizes a fresh one when serialization overflows.
+        let mut ctx = crate::testutil::test_ctx().await;
+        let big_record = DnsRecord::UNKNOWN {
+            domain: "huge.test".into(),
+            qtype: 99,
+            data: vec![0u8; 5000], // exceeds the 4096-byte serialization buffer
+            ttl: 60,
+        };
+        ctx.zone_map = crate::config::ZoneMap::from_exact(vec![big_record]);
+        let ctx = Arc::new(ctx);
+
+        let mut query = DnsPacket::query(0xBEEF, "huge.test", QueryType::UNKNOWN(99));
+        query.edns = Some(crate::packet::EdnsOpt::default());
+        let (resp, _) = resolve_in_test_with_query(&ctx, query).await;
+
+        assert!(resp.header.truncated_message, "TC bit must be set");
+        assert!(resp.edns.is_some(), "TC response must mirror client's OPT");
     }
 }
