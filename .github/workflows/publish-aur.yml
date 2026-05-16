@@ -27,7 +27,7 @@ on:
       - 'site/**'
       - 'blog/**'
       - 'drafts/**'
-      - '*.md'
+      - '**/*.md'
       - 'scripts/serve-site.sh'
       - 'scripts/generate-blog-index.sh'
   workflow_dispatch:

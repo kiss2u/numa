@@ -7,7 +7,7 @@ on:
       - 'site/**'
       - 'blog/**'
       - 'drafts/**'
-      - '*.md'
+      - '**/*.md'
       - 'scripts/serve-site.sh'
       - 'scripts/generate-blog-index.sh'
   pull_request:
@@ -16,7 +16,7 @@ on:
       - 'site/**'
       - 'blog/**'
       - 'drafts/**'
-      - '*.md'
+      - '**/*.md'
       - 'scripts/serve-site.sh'
       - 'scripts/generate-blog-index.sh'
 
