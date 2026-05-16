@@ -21,7 +21,8 @@ For public DoH with a real (ACME-signed) cert, terminate TLS outside Numa and fo
 ```lua
 -- /etc/dnsdist/dnsdist.conf
 
-newServer({address="127.0.0.1:53", name="numa", checkType="A", checkName="numa.rs."})
+newServer({address="127.0.0.1:53", name="numa", checkType="A", checkName="numa.rs.",
+           useProxyProtocol=true})  -- preserves real client IPs (see below)
 
 addDOHLocal(
   "0.0.0.0:443",
@@ -43,16 +44,20 @@ addAction(AllRule(), PoolAction("", false))
 ## Numa config
 
 ```toml
+[server.proxy_protocol]
+from = ["127.0.0.1/32"]  # trust the local dnsdist front-end to prepend PROXY v2
+header_timeout_ms = 5000
+
 [proxy]
-enabled   = true         # keep if you still use *.numa service routing
+enabled   = true         # unrelated — keep if you still use *.numa service routing
 bind_addr = "127.0.0.1"  # stays default
 ```
 
-No changes to `[server]` — Numa keeps serving plain DNS on UDP/TCP 53, which dnsdist forwards.
+No changes to `[server]` bind — Numa keeps serving plain DNS on UDP/TCP 53, which dnsdist forwards with a PROXY v2 header prepended. Numa parses the header, records the real client IP in `/stats.proxy_protocol.*`, and answers as normal.
 
-## Caveat: client IPs
+## Caveat: encrypted-PROXY backends
 
-Without PROXY protocol support in Numa, the query log shows the front-end's IP on every query, not the real client. dnsdist can emit PROXY v2 (`useProxyProtocol=true` on `newServer`), but Numa doesn't yet parse it — tracked in the wish-list under #143. Until then, accept the blind spot or correlate against dnsdist's own logs.
+`useProxyProtocol=true` works because the dnsdist→Numa hop here is plain DNS. If you ever change `newServer` to a TLS backend (`tls="openssl"` etc.), dnsdist sends the PROXY header **inside** the TLS session ("encrypted PROXY"); Numa parses PROXY v2 *before* TLS, so the header is missed and queries fail. Stay on plain DNS to loopback, or front Numa with HAProxy / nginx-stream / a cloud L4 LB instead — see `tests/docker/pp2-numa/README.md` for the full write-up.
 
 ## Verify
 
@@ -61,4 +66,4 @@ kdig +https @dns.example.com example.com
 kdig +tls  @dns.example.com example.com
 ```
 
-Both should return clean answers. Numa's `/queries` API should show the request landing, sourced from the front-end IP.
+Both should return clean answers. Numa's `/queries` API should show the request landing, sourced from the **real client IP** (not loopback), and `curl -s http://127.0.0.1:5380/stats | jq '.proxy_protocol'` should show `accepted` incrementing per query.
