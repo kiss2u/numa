@@ -337,6 +337,12 @@ fn iter_nameservers(content: &str) -> impl Iterator<Item = &str> {
 /// Parse resolv.conf in a single pass, extracting the first non-loopback
 /// nameserver and all search domains.
 #[cfg(target_os = "linux")]
+fn normalize_search_domain(domain: &str) -> Option<String> {
+    let domain = domain.trim().trim_end_matches('.');
+    (!domain.is_empty()).then(|| domain.to_string())
+}
+
+#[cfg(target_os = "linux")]
 fn parse_resolv_conf(path: &str) -> (Option<String>, Vec<String>) {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -350,7 +356,9 @@ fn parse_resolv_conf(path: &str) -> (Option<String>, Vec<String>) {
         let line = line.trim();
         if line.starts_with("search") || line.starts_with("domain") {
             for domain in line.split_whitespace().skip(1) {
-                search_domains.push(domain.to_string());
+                if let Some(domain) = normalize_search_domain(domain) {
+                    search_domains.push(domain);
+                }
             }
         }
     }
@@ -2017,6 +2025,49 @@ mod tests {
         let mixed = "nameserver 127.0.0.1\nnameserver 1.1.1.1\n";
         assert!(resolv_conf_has_real_upstream(mixed));
         assert!(!resolv_conf_is_numa_managed(mixed));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn parse_resolv_conf_ignores_root_search_domain() {
+        let path = std::env::temp_dir().join(format!(
+            "numa-resolv-conf-root-search-{}",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "nameserver 127.0.0.53\noptions edns0 trust-ad\nsearch .\n",
+        )
+        .unwrap();
+
+        let (upstream, search_domains) = parse_resolv_conf(path.to_str().unwrap());
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(upstream, None);
+        assert!(search_domains.is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn parse_resolv_conf_preserves_real_search_domains() {
+        let path = std::env::temp_dir().join(format!(
+            "numa-resolv-conf-search-domain-{}",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "nameserver 192.168.1.1\nsearch ec2.internal compute.internal. corp.example.\n",
+        )
+        .unwrap();
+
+        let (upstream, search_domains) = parse_resolv_conf(path.to_str().unwrap());
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(upstream.as_deref(), Some("192.168.1.1"));
+        assert_eq!(
+            search_domains,
+            vec!["ec2.internal", "compute.internal", "corp.example"]
+        );
     }
 
     #[test]
