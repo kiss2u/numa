@@ -335,13 +335,8 @@ fn iter_nameservers(content: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Parse resolv.conf in a single pass, extracting the first non-loopback
-/// nameserver and all search domains.
-#[cfg(target_os = "linux")]
-fn normalize_search_domain(domain: &str) -> Option<String> {
-    let domain = domain.trim().trim_end_matches('.');
-    (!domain.is_empty()).then(|| domain.to_string())
-}
-
+/// nameserver and all search domains. Trailing dots are stripped and the
+/// root domain (`.`, as emitted by systemd-resolved for `~.`) is dropped.
 #[cfg(target_os = "linux")]
 fn parse_resolv_conf(path: &str) -> (Option<String>, Vec<String>) {
     let text = match std::fs::read_to_string(path) {
@@ -356,8 +351,9 @@ fn parse_resolv_conf(path: &str) -> (Option<String>, Vec<String>) {
         let line = line.trim();
         if line.starts_with("search") || line.starts_with("domain") {
             for domain in line.split_whitespace().skip(1) {
-                if let Some(domain) = normalize_search_domain(domain) {
-                    search_domains.push(domain);
+                let domain = domain.trim_end_matches('.');
+                if !domain.is_empty() {
+                    search_domains.push(domain.to_string());
                 }
             }
         }
