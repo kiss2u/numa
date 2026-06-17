@@ -90,11 +90,12 @@ impl ClientPolicySet {
 
     /// Rules matching `peer`, in declaration order. Canonicalizes so the
     /// loopback bypass also covers `::ffff:127.0.0.1` from a dual-stack bind;
-    /// loopback (and an empty rule set) yields nothing, so a stub resolver on
-    /// the same host never reaches the matcher and cannot be filtered.
+    /// loopback yields nothing, so a stub resolver on the same host never
+    /// reaches the matcher and cannot be filtered. An empty rule set yields
+    /// nothing on its own.
     fn matching_rules(&self, peer: IpAddr) -> impl Iterator<Item = &ClientPolicy> {
         let peer = peer.to_canonical();
-        let bypass = self.rules.is_empty() || peer.is_loopback();
+        let bypass = peer.is_loopback();
         self.rules
             .iter()
             .filter(move |rule| !bypass && rule.nets.matches(peer))
